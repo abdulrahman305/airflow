@@ -27,7 +27,7 @@ from datetime import datetime
 
 from google.cloud.dlp_v2.types import InspectConfig, InspectJobConfig
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.dlp import (
     CloudDLPCancelDLPJobOperator,
     CloudDLPCreateDLPJobOperator,
@@ -36,10 +36,11 @@ from airflow.providers.google.cloud.operators.dlp import (
     CloudDLPListDLPJobsOperator,
 )
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "dlp_job"
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 JOB_ID = f"dlp_job_{ENV_ID}"
 
@@ -52,7 +53,7 @@ INSPECT_JOB = InspectJobConfig(
 )
 
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),

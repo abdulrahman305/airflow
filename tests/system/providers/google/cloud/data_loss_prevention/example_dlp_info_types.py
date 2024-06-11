@@ -26,9 +26,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from google.cloud.dlp_v2 import StoredInfoTypeConfig
 from google.cloud.dlp_v2.types import ContentItem, InspectConfig, InspectTemplate
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.dlp import (
     CloudDLPCreateStoredInfoTypeOperator,
     CloudDLPDeleteStoredInfoTypeOperator,
@@ -40,10 +41,11 @@ from airflow.providers.google.cloud.operators.dlp import (
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.transfers.local_to_gcs import LocalFilesystemToGCSOperator
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "dlp_info_types"
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 TEMPLATE_ID = f"dlp-inspect-info-{ENV_ID}"
 ITEM = ContentItem(
@@ -64,20 +66,22 @@ OBJECT_GCS_URI = f"gs://{BUCKET_NAME}/{FILE_SET}"
 OBJECT_GCS_OUTPUT_URI = OBJECT_GCS_URI + FILE_NAME
 
 CUSTOM_INFO_TYPE_ID = "custom_info_type"
-CUSTOM_INFO_TYPES = {
-    "large_custom_dictionary": {
-        "output_path": {"path": OBJECT_GCS_OUTPUT_URI},
-        "cloud_storage_file_set": {"url": OBJECT_GCS_URI + "*"},
+CUSTOM_INFO_TYPES = StoredInfoTypeConfig(
+    {
+        "large_custom_dictionary": {
+            "output_path": {"path": OBJECT_GCS_OUTPUT_URI},
+            "cloud_storage_file_set": {"url": f"{OBJECT_GCS_URI}*"},
+        }
     }
-}
+)
 UPDATE_CUSTOM_INFO_TYPE = {
     "large_custom_dictionary": {
         "output_path": {"path": OBJECT_GCS_OUTPUT_URI},
-        "cloud_storage_file_set": {"url": OBJECT_GCS_URI + "*"},
+        "cloud_storage_file_set": {"url": f"{OBJECT_GCS_URI}*"},
     }
 }
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),

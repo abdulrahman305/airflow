@@ -18,6 +18,7 @@
 """
 Example Airflow DAG for Google Cloud Memorystore service.
 """
+
 from __future__ import annotations
 
 import os
@@ -25,7 +26,7 @@ from datetime import datetime
 
 from google.cloud.redis_v1 import FailoverInstanceRequest, Instance
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.operators.bash import BashOperator
 from airflow.providers.google.cloud.operators.cloud_memorystore import (
     CloudMemorystoreCreateInstanceAndImportOperator,
@@ -46,10 +47,11 @@ from airflow.providers.google.cloud.operators.gcs import (
     GCSDeleteBucketOperator,
 )
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 ENV_ID_LOWER = ENV_ID.lower() if ENV_ID else ""
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "cloud_memorystore_redis"
 
@@ -68,14 +70,16 @@ FIRST_INSTANCE = {"tier": Instance.Tier.BASIC, "memory_size_gb": 1}
 SECOND_INSTANCE = {"tier": Instance.Tier.STANDARD_HA, "memory_size_gb": 3}
 
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",  # Override to match your needs
     start_date=datetime(2021, 1, 1),
     catchup=False,
     tags=["example"],
 ) as dag:
-    create_bucket = GCSCreateBucketOperator(task_id="create_bucket", bucket_name=BUCKET_NAME)
+    create_bucket = GCSCreateBucketOperator(
+        task_id="create_bucket", bucket_name=BUCKET_NAME, resource={"predefined_acl": "public_read_write"}
+    )
 
     # [START howto_operator_create_instance]
     create_instance = CloudMemorystoreCreateInstanceOperator(

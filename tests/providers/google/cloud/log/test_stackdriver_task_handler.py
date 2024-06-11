@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
@@ -24,9 +25,12 @@ import pytest
 from google.cloud.logging import Resource
 from google.cloud.logging_v2.types import ListLogEntriesRequest, ListLogEntriesResponse, LogEntry
 
+from airflow.exceptions import RemovedInAirflow3Warning
 from airflow.providers.google.cloud.log.stackdriver_task_handler import StackdriverTaskHandler
 from airflow.utils import timezone
 from airflow.utils.state import TaskInstanceState
+from tests.test_utils.compat import AIRFLOW_V_2_9_PLUS
+from tests.test_utils.config import conf_vars
 from tests.test_utils.db import clear_db_dags, clear_db_runs
 
 
@@ -36,15 +40,14 @@ def _create_list_log_entries_response_mock(messages, token):
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def clean_stackdriver_handlers():
     yield
     for handler_ref in reversed(logging._handlerList[:]):
         handler = handler_ref()
-        if not isinstance(handler, StackdriverTaskHandler):
-            continue
-        logging._removeHandlerRef(handler_ref)
-        del handler
+        if isinstance(handler, StackdriverTaskHandler):
+            logging._removeHandlerRef(handler_ref)
+            del handler
 
 
 @pytest.mark.usefixtures("clean_stackdriver_handlers")
@@ -68,6 +71,45 @@ def test_should_pass_message_to_client(mock_client, mock_get_creds_and_project_i
     mock_client.assert_called_once_with(credentials="creds", client_info=mock.ANY, project="project_id")
 
 
+@pytest.mark.usefixtures("clean_stackdriver_handlers")
+@mock.patch("airflow.providers.google.cloud.log.stackdriver_task_handler.get_credentials_and_project_id")
+@mock.patch("airflow.providers.google.cloud.log.stackdriver_task_handler.gcp_logging.Client")
+def test_should_use_configured_log_name(mock_client, mock_get_creds_and_project_id):
+    import importlib
+    import logging
+
+    from airflow import settings
+    from airflow.config_templates import airflow_local_settings
+
+    mock_get_creds_and_project_id.return_value = ("creds", "project_id")
+
+    try:
+        # this is needed for Airflow 2.8 and below where default settings are triggering warning on
+        # extra "name" in the configuration of stackdriver handler. As of Airflow 2.9 this warning is not
+        # emitted.
+        context_manager = nullcontext() if AIRFLOW_V_2_9_PLUS else pytest.warns(RemovedInAirflow3Warning)
+        with context_manager:
+            with conf_vars(
+                {
+                    ("logging", "remote_logging"): "True",
+                    ("logging", "remote_base_log_folder"): "stackdriver://host/path",
+                }
+            ):
+                importlib.reload(airflow_local_settings)
+                settings.configure_logging()
+
+                logger = logging.getLogger("airflow.task")
+                handler = logger.handlers[0]
+                assert isinstance(handler, StackdriverTaskHandler)
+                with mock.patch.object(handler, "transport_type") as transport_type_mock:
+                    logger.error("foo")
+                    transport_type_mock.assert_called_once_with(mock_client.return_value, "path")
+    finally:
+        importlib.reload(airflow_local_settings)
+        settings.configure_logging()
+
+
+@pytest.mark.db_test
 class TestStackdriverLoggingHandlerTask:
     DAG_ID = "dag_for_testing_stackdriver_file_task_handler"
     TASK_ID = "task_for_testing_stackdriver_task_handler"
@@ -311,7 +353,7 @@ labels.try_number="3"'''
 
         entry = mock.MagicMock(json_payload={"message": "TEXT"})
         page = mock.MagicMock(entries=[entry, entry], next_page_token=None)
-        mock_client.return_value.list_log_entries.return_value.pages = (n for n in [page])
+        mock_client.return_value.list_log_entries.return_value.pages = iter([page])
 
         logs, metadata = stackdriver_task_handler.read(self.ti)
         mock_client.return_value.list_log_entries.assert_called_once_with(
@@ -372,7 +414,7 @@ labels.try_number="3"'''
         assert {"project", "interval", "resource", "advancedFilter"} == set(parsed_qs.keys())
         assert "global" in parsed_qs["resource"]
 
-        filter_params = parsed_qs["advancedFilter"][0].split("\n")
+        filter_params = parsed_qs["advancedFilter"][0].splitlines()
         expected_filter = [
             'resource.type="global"',
             'logName="projects/project_id/logs/airflow"',

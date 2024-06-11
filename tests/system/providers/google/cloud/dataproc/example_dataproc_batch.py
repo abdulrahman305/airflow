@@ -17,14 +17,15 @@
 """
 Example Airflow DAG for Dataproc batch operators.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
 
-from google.api_core.retry import Retry
+from google.api_core.retry_async import AsyncRetry
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.dataproc import (
     DataprocCancelOperationOperator,
     DataprocCreateBatchOperator,
@@ -34,10 +35,11 @@ from airflow.providers.google.cloud.operators.dataproc import (
 )
 from airflow.providers.google.cloud.sensors.dataproc import DataprocBatchSensor
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 DAG_ID = "dataproc_batch"
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 REGION = "europe-west1"
 
 BATCH_ID = f"batch-{ENV_ID}-{DAG_ID}".replace("_", "-")
@@ -53,7 +55,7 @@ BATCH_CONFIG = {
 }
 
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
@@ -75,7 +77,7 @@ with models.DAG(
         region=REGION,
         batch=BATCH_CONFIG,
         batch_id=BATCH_ID_2,
-        result_retry=Retry(maximum=10.0, initial=10.0, multiplier=1.0),
+        result_retry=AsyncRetry(maximum=10.0, initial=10.0, multiplier=1.0),
     )
 
     create_batch_3 = DataprocCreateBatchOperator(

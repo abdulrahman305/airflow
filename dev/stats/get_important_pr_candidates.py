@@ -25,12 +25,15 @@ import re
 import textwrap
 from datetime import datetime
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 import pendulum
 import rich_click as click
 from github import Github, UnknownObjectException
-from github.PullRequest import PullRequest
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from github.PullRequest import PullRequest
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +350,7 @@ def main(
     if load:
         console.print("Loading PRs from cache and recalculating scores.")
         selected_prs = pickle.load(load, encoding="bytes")
-        for issue_num, pr in enumerate(selected_prs, 1):
+        for pr in selected_prs:
             console.print(
                 f"[green]Loading PR: #{pr.pull_request.number} `{pr.pull_request.title}`.[/]"
                 f" Score: {pr.score}."

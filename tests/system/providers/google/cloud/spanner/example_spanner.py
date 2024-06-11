@@ -18,12 +18,13 @@
 """
 Example Airflow DAG that creates, updates, queries and deletes a Cloud Spanner instance.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.spanner import (
     SpannerDeleteDatabaseInstanceOperator,
     SpannerDeleteInstanceOperator,
@@ -33,9 +34,10 @@ from airflow.providers.google.cloud.operators.spanner import (
     SpannerUpdateDatabaseInstanceOperator,
 )
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "spanner"
 
@@ -48,7 +50,7 @@ GCP_SPANNER_DISPLAY_NAME = "InstanceSpanner"
 OPERATION_ID = "unique_operation_id"
 
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",  # Override to match your needs
     start_date=datetime(2021, 1, 1),

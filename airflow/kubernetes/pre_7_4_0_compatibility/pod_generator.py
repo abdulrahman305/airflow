@@ -24,16 +24,17 @@ API and outputs a kubernetes.client.models.V1Pod.
 The advantage being that the full Kubernetes API
 is supported and no serialization need be written.
 """
+
 from __future__ import annotations
 
 import copy
-import datetime
 import logging
 import os
 import secrets
 import string
 import warnings
 from functools import reduce
+from typing import TYPE_CHECKING
 
 import re2
 from dateutil import parser
@@ -53,6 +54,9 @@ from airflow.kubernetes.pre_7_4_0_compatibility.pod_generator_deprecated import 
 from airflow.utils import yaml
 from airflow.utils.hashlib_wrapper import md5
 from airflow.version import version as airflow_version
+
+if TYPE_CHECKING:
+    import datetime
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +170,7 @@ class PodGenerator:
 
     def gen_pod(self) -> k8s.V1Pod:
         """Generate pod."""
-        warnings.warn("This function is deprecated. ", RemovedInAirflow3Warning)
+        warnings.warn("This function is deprecated. ", RemovedInAirflow3Warning, stacklevel=2)
         result = self.ud_pod
 
         result.metadata.name = add_pod_suffix(pod_name=result.metadata.name)
@@ -181,7 +185,9 @@ class PodGenerator:
         """Add sidecar."""
         warnings.warn(
             "This function is deprecated. "
-            "Please use airflow.providers.cncf.kubernetes.utils.xcom_sidecar.add_xcom_sidecar instead"
+            "Please use airflow.providers.cncf.kubernetes.utils.xcom_sidecar.add_xcom_sidecar instead",
+            RemovedInAirflow3Warning,
+            stacklevel=2,
         )
         pod_cp = copy.deepcopy(pod)
         pod_cp.spec.volumes = pod.spec.volumes or []
@@ -219,6 +225,7 @@ class PodGenerator:
                 'please use a `kubernetes.client.models.V1Pod` class with a "pod_override" key'
                 " instead. ",
                 category=RemovedInAirflow3Warning,
+                stacklevel=2,
             )
             return PodGenerator.from_legacy_obj(obj)
         else:
@@ -363,9 +370,10 @@ class PodGenerator:
         client_container = extend_object_field(base_container, client_container, "volume_devices")
         client_container = merge_objects(base_container, client_container)
 
-        return [client_container] + PodGenerator.reconcile_containers(
-            base_containers[1:], client_containers[1:]
-        )
+        return [
+            client_container,
+            *PodGenerator.reconcile_containers(base_containers[1:], client_containers[1:]),
+        ]
 
     @classmethod
     def construct_pod(
@@ -396,7 +404,9 @@ class PodGenerator:
         """
         if len(pod_id) > 253:
             warnings.warn(
-                "pod_id supplied is longer than 253 characters; truncating and adding unique suffix."
+                "pod_id supplied is longer than 253 characters; truncating and adding unique suffix.",
+                category=UserWarning,
+                stacklevel=2,
             )
             pod_id = add_pod_suffix(pod_name=pod_id, max_len=253)
         try:
@@ -491,9 +501,9 @@ class PodGenerator:
             airflow_worker=airflow_worker,
         )
         label_strings = [f"{label_id}={label}" for label_id, label in sorted(labels.items())]
-        selector = ",".join(label_strings)
         if not airflow_worker:  # this filters out KPO pods even when we don't know the scheduler job id
-            selector += ",airflow-worker"
+            label_strings.append("airflow-worker")
+        selector = ",".join(label_strings)
         return selector
 
     @classmethod
@@ -594,6 +604,7 @@ class PodGenerator:
         warnings.warn(
             "This function is deprecated. Use `add_pod_suffix` in `kubernetes_helper_functions`.",
             RemovedInAirflow3Warning,
+            stacklevel=2,
         )
 
         if not pod_id:

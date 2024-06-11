@@ -33,7 +33,16 @@ interface Props {
 
 const InstanceTooltip = ({
   group,
-  instance: { taskId, startDate, endDate, state, runId, mappedStates, note },
+  instance: {
+    taskId,
+    startDate,
+    endDate,
+    state,
+    runId,
+    mappedStates,
+    note,
+    tryNumber,
+  },
 }: Props) => {
   if (!group) return null;
   const isGroup = !!group.children;
@@ -83,11 +92,17 @@ const InstanceTooltip = ({
           <Text>
             Started: <Time dateTime={startDate} />
           </Text>
+          {endDate && (
+            <Text>
+              Ended: <Time dateTime={endDate} />
+            </Text>
+          )}
           <Text>
             Duration: {formatDuration(getDuration(startDate, endDate))}
           </Text>
         </>
       )}
+      {tryNumber && tryNumber > 1 && <Text>Try Number: {tryNumber}</Text>}
       {group.triggerRule && <Text>Trigger Rule: {group.triggerRule}</Text>}
       {note && <Text>Contains a note</Text>}
     </Box>

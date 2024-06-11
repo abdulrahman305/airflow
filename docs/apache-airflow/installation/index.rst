@@ -89,12 +89,15 @@ More details: :doc:`installing-from-sources`
 
 **Where to ask for help**
 
-* The ``#development`` slack channel for building the software.
-
-* The ``#troubleshooting`` slack is a channel for quick general troubleshooting questions. The
+* The ``#user-troubleshooting`` channel on slack can be used for quick general troubleshooting questions. The
   `GitHub discussions <https://github.com/apache/airflow/discussions>`__ if you look for longer discussion and have more information to share.
 
+* The ``#user-best-practices`` channel on slack can be used to ask for and share best practices on using and deploying airflow.
+
 * If you can provide description of a reproducible problem with Airflow software, you can open issue at `GitHub issues <https://github.com/apache/airflow/issues>`_
+
+* If you want to contribute back to Airflow, the ``#contributors`` slack channel for building the Airflow itself
+
 
 Using PyPI
 '''''''''''
@@ -138,14 +141,16 @@ More details:  :doc:`/installation/installing-from-pypi`
   diagnose and solve.
 * You have :doc:`/start` where you can see an example of Quick Start with running Airflow
   locally which you can use to start Airflow quickly for local testing and development.
-  However, this is just for inspiration. Do not expect this docker-compose is ready for production installation,
+  However, this is just for inspiration. Do not expect :doc:`/start` is ready for production installation,
   you need to build your own production-ready deployment if you follow this approach.
 
 **Where to ask for help**
 
-* The ``#troubleshooting`` channel on Airflow Slack for quick general
+* The ``#user-troubleshooting`` channel on Airflow Slack for quick general
   troubleshooting questions. The `GitHub discussions <https://github.com/apache/airflow/discussions>`__
   if you look for longer discussion and have more information to share.
+* The ``#user-best-practices`` channel on slack can be used to ask for and share best
+  practices on using and deploying airflow.
 * If you can provide description of a reproducible problem with Airflow software, you can open
   issue at `GitHub issues <https://github.com/apache/airflow/issues>`__
 
@@ -205,9 +210,11 @@ and official constraint files- same that are used for installing Airflow from Py
 **Where to ask for help**
 
 * For quick questions with the Official Docker Image there is the ``#production-docker-image`` channel in Airflow Slack.
-* The ``#troubleshooting`` channel on Airflow Slack for quick general
+* The ``#user-troubleshooting`` channel on Airflow Slack for quick general
   troubleshooting questions. The `GitHub discussions <https://github.com/apache/airflow/discussions>`__
   if you look for longer discussion and have more information to share.
+* The ``#user-best-practices`` channel on slack can be used to ask for and share best
+  practices on using and deploying airflow.
 * If you can provide description of a reproducible problem with Airflow software, you can open
   issue at `GitHub issues <https://github.com/apache/airflow/issues>`__
 
@@ -262,9 +269,11 @@ More details: :doc:`helm-chart:index`
 
 * For quick questions with the Official Docker Image there is the ``#production-docker-image`` channel in Airflow Slack.
 * For quick questions with the official Helm Chart there is the ``#helm-chart-official`` channel in Slack.
-* The ``#troubleshooting`` channel on Airflow Slack for quick general
+* The ``#user-troubleshooting`` channel on Airflow Slack for quick general
   troubleshooting questions. The `GitHub discussions <https://github.com/apache/airflow/discussions>`__
   if you look for longer discussion and have more information to share.
+* The ``#user-best-practices`` channel on slack can be used to ask for and share best
+  practices on using and deploying airflow.
 * If you can provide description of a reproducible problem with Airflow software, you can open
   issue at `GitHub issues <https://github.com/apache/airflow/issues>`__
 

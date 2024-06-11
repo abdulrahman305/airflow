@@ -16,6 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Pools sub-commands."""
+
 from __future__ import annotations
 
 import json
@@ -97,7 +98,7 @@ def pool_import(args):
     if not os.path.exists(args.file):
         raise SystemExit(f"Missing pools file {args.file}")
     pools, failed = pool_import_helper(args.file)
-    if len(failed) > 0:
+    if failed:
         raise SystemExit(f"Failed to update pool(s): {', '.join(failed)}")
     print(f"Uploaded {len(pools)} pool(s)")
 

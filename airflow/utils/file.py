@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 import ast
-import io
+import hashlib
 import logging
 import os
 import zipfile
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Generator, NamedTuple, Pattern, Protocol, overload
 
@@ -32,6 +33,8 @@ from airflow.configuration import conf
 from airflow.exceptions import RemovedInAirflow3Warning
 
 log = logging.getLogger(__name__)
+
+MODIFIED_DAG_MODULE_NAME = "unusual_prefix_{path_hash}_{module_name}"
 
 
 class _IgnoreRule(Protocol):
@@ -155,13 +158,11 @@ ZIP_REGEX = re2.compile(rf"((.*\.zip){re2.escape(os.sep)})?(.*)")
 
 
 @overload
-def correct_maybe_zipped(fileloc: None) -> None:
-    ...
+def correct_maybe_zipped(fileloc: None) -> None: ...
 
 
 @overload
-def correct_maybe_zipped(fileloc: str | Path) -> str | Path:
-    ...
+def correct_maybe_zipped(fileloc: str | Path) -> str | Path: ...
 
 
 def correct_maybe_zipped(fileloc: None | str | Path) -> None | str | Path:
@@ -189,7 +190,7 @@ def open_maybe_zipped(fileloc, mode="r"):
     """
     _, archive, filename = ZIP_REGEX.search(fileloc).groups()
     if archive and zipfile.is_zipfile(archive):
-        return io.TextIOWrapper(zipfile.ZipFile(archive, mode=mode).open(filename))
+        return TextIOWrapper(zipfile.ZipFile(archive, mode=mode).open(filename))
     else:
         return open(fileloc, mode=mode)
 
@@ -244,12 +245,10 @@ def _find_path_from_directory(
             patterns_by_dir.update({dirpath: patterns.copy()})
 
         for file in files:
-            if file == ignore_file_name:
-                continue
-            abs_file_path = Path(root) / file
-            if ignore_rule_type.match(abs_file_path, patterns):
-                continue
-            yield str(abs_file_path)
+            if file != ignore_file_name:
+                abs_file_path = Path(root) / file
+                if not ignore_rule_type.match(abs_file_path, patterns):
+                    yield str(abs_file_path)
 
 
 def find_path_from_directory(
@@ -310,16 +309,11 @@ def find_dag_file_paths(directory: str | os.PathLike[str], safe_mode: bool) -> l
     file_paths = []
 
     for file_path in find_path_from_directory(directory, ".airflowignore"):
+        path = Path(file_path)
         try:
-            if not os.path.isfile(file_path):
-                continue
-            _, file_ext = os.path.splitext(os.path.split(file_path)[-1])
-            if file_ext != ".py" and not zipfile.is_zipfile(file_path):
-                continue
-            if not might_contain_dag(file_path, safe_mode):
-                continue
-
-            file_paths.append(file_path)
+            if path.is_file() and (path.suffix == ".py" or zipfile.is_zipfile(path)):
+                if might_contain_dag(file_path, safe_mode):
+                    file_paths.append(file_path)
         except Exception:
             log.exception("Error while examining %s", file_path)
 
@@ -386,3 +380,12 @@ def iter_airflow_imports(file_path: str) -> Generator[str, None, None]:
     for m in _find_imported_modules(parsed):
         if m.startswith("airflow."):
             yield m
+
+
+def get_unique_dag_module_name(file_path: str) -> str:
+    """Return a unique module name in the format unusual_prefix_{sha1 of module's file path}_{original module name}."""
+    if isinstance(file_path, str):
+        path_hash = hashlib.sha1(file_path.encode("utf-8")).hexdigest()
+        org_mod_name = Path(file_path).stem
+        return MODIFIED_DAG_MODULE_NAME.format(path_hash=path_hash, module_name=org_mod_name)
+    raise ValueError("file_path should be a string to generate unique module name")

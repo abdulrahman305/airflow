@@ -16,18 +16,18 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Airflow DAG that show how to check Hive partitions existence
-using Dataproc Metastore Sensor.
+Example Airflow DAG that shows how to check Hive partitions existence with Dataproc Metastore Sensor.
 
 Note that Metastore service must be configured to use gRPC endpoints.
 """
+
 from __future__ import annotations
 
 import datetime
 import os
 
-from airflow import models
 from airflow.decorators import task
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.hooks.gcs import _parse_gcs_url
 from airflow.providers.google.cloud.operators.dataproc import (
     DataprocCreateClusterOperator,
@@ -46,7 +46,7 @@ from airflow.utils.trigger_rule import TriggerRule
 DAG_ID = "hive_partition_sensor"
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "demo-project")
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "demo-env")
-REGION = "us-central1"
+REGION = "europe-west1"
 NETWORK = "default"
 
 METASTORE_SERVICE_ID = f"metastore-{DAG_ID}-{ENV_ID}".replace("_", "-")
@@ -59,7 +59,7 @@ METASTORE_SERVICE = {
     "network": f"projects/{PROJECT_ID}/global/networks/{NETWORK}",
 }
 METASTORE_SERVICE_QFN = f"projects/{PROJECT_ID}/locations/{REGION}/services/{METASTORE_SERVICE_ID}"
-DATAPROC_CLUSTER_NAME = f"cluster-{DAG_ID}".replace("_", "-")
+DATAPROC_CLUSTER_NAME = f"cluster-{DAG_ID}-{ENV_ID}".replace("_", "-")
 DATAPROC_CLUSTER_CONFIG = {
     "master_config": {
         "num_instances": 1,
@@ -106,14 +106,13 @@ INSERT INTO TABLE {TABLE_NAME} PARTITION ({COLUMN})
 SELECT SubmissionDate,TransactionAmount,TransactionType FROM transactions;
 """
 
-with models.DAG(
+with DAG(
     DAG_ID,
     start_date=datetime.datetime(2021, 1, 1),
     schedule="@once",
     catchup=False,
     tags=["example", "dataproc", "metastore", "partition", "hive", "sensor"],
 ) as dag:
-
     create_metastore_service = DataprocMetastoreCreateServiceOperator(
         task_id="create_metastore_service",
         region=REGION,
@@ -133,7 +132,7 @@ with models.DAG(
 
     @task(task_id="get_hive_warehouse_bucket_task")
     def get_hive_warehouse_bucket(**kwargs):
-        """Returns Hive Metastore Warehouse GCS bucket name."""
+        """Return Hive Metastore Warehouse GCS bucket name."""
         ti = kwargs["ti"]
         metastore_service: dict = ti.xcom_pull(task_ids="create_metastore_service")
         config_overrides: dict = metastore_service["hive_metastore_config"]["config_overrides"]
@@ -216,19 +215,16 @@ with models.DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    # TEST SETUP
     (
+        # TEST SETUP
         create_metastore_service
         >> create_cluster
         >> get_hive_warehouse_bucket_task
         >> copy_source_data
         >> create_external_table
         >> create_partitioned_table
-        >> partition_data
-    )
-    (
-        create_metastore_service
         # TEST BODY
+        >> partition_data
         >> hive_partition_sensor
         # TEST TEARDOWN
         >> [delete_dataproc_cluster, delete_metastore_service, delete_warehouse_bucket]

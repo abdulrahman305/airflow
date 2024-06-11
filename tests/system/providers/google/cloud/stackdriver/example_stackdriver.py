@@ -18,14 +18,15 @@
 """
 Example Airflow DAG for Google Cloud Stackdriver service.
 """
+
 from __future__ import annotations
 
 import json
 import os
 from datetime import datetime
 
-from airflow import models
 from airflow.models.baseoperator import chain
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.stackdriver import (
     StackdriverDeleteAlertOperator,
     StackdriverDeleteNotificationChannelOperator,
@@ -39,9 +40,10 @@ from airflow.providers.google.cloud.operators.stackdriver import (
     StackdriverUpsertNotificationChannelOperator,
 )
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 DAG_ID = "stackdriver"
 
 ALERT_1_NAME = f"alert_{ENV_ID}_1"
@@ -123,7 +125,7 @@ TEST_NOTIFICATION_CHANNEL_2 = {
     "type": "pubsub",
 }
 
-with models.DAG(
+with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),

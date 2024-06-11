@@ -15,13 +15,14 @@
 # specific language governing permissions and limitations
 # under the License.
 """This module contains the Apache Livy hook."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import re
 from enum import Enum
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import aiohttp
 import requests
@@ -29,9 +30,11 @@ from aiohttp import ClientResponseError
 from asgiref.sync import sync_to_async
 
 from airflow.exceptions import AirflowException
-from airflow.models import Connection
 from airflow.providers.http.hooks.http import HttpAsyncHook, HttpHook
 from airflow.utils.log.logging_mixin import LoggingMixin
+
+if TYPE_CHECKING:
+    from airflow.models import Connection
 
 
 class BatchState(Enum):
@@ -417,7 +420,7 @@ class LivyHook(HttpHook, LoggingMixin):
         :param size: size value
         :return: true if valid format
         """
-        if size and not (isinstance(size, str) and re.match(r"^\d+[kmgt]b?$", size, re.IGNORECASE)):
+        if size and not (isinstance(size, str) and re.fullmatch(r"\d+[kmgt]b?", size, re.IGNORECASE)):
             raise ValueError(f"Invalid java size format for string'{size}'")
         return True
 
@@ -432,7 +435,7 @@ class LivyHook(HttpHook, LoggingMixin):
         if (
             vals is None
             or not isinstance(vals, (tuple, list))
-            or any(1 for val in vals if not isinstance(val, (str, int, float)))
+            or not all(isinstance(val, (str, int, float)) for val in vals)
         ):
             raise ValueError("List of strings expected")
         return True
@@ -448,7 +451,7 @@ class LivyHook(HttpHook, LoggingMixin):
         if conf:
             if not isinstance(conf, dict):
                 raise ValueError("'conf' argument must be a dict")
-            if any(True for k, v in conf.items() if not (v and isinstance(v, str) or isinstance(v, int))):
+            if not all(isinstance(v, (str, int)) and v != "" for v in conf.values()):
                 raise ValueError("'conf' values must be either strings or ints")
         return True
 
@@ -542,8 +545,7 @@ class LivyAsyncHook(HttpAsyncHook, LoggingMixin):
             else:
                 return {"Response": f"Unexpected HTTP Method: {self.method}", "status": "error"}
 
-            attempt_num = 1
-            while True:
+            for attempt_num in range(1, 1 + self.retry_limit):
                 response = await request_func(
                     url,
                     json=data if self.method in ("POST", "PATCH") else None,
@@ -568,7 +570,6 @@ class LivyAsyncHook(HttpAsyncHook, LoggingMixin):
                         # Don't retry.
                         return {"Response": {e.message}, "Status Code": {e.status}, "status": "error"}
 
-                attempt_num += 1
                 await asyncio.sleep(self.retry_delay)
 
     def _generate_base_url(self, conn: Connection) -> str:
@@ -800,7 +801,7 @@ class LivyAsyncHook(HttpAsyncHook, LoggingMixin):
         :param size: size value
         :return: true if valid format
         """
-        if size and not (isinstance(size, str) and re.match(r"^\d+[kmgt]b?$", size, re.IGNORECASE)):
+        if size and not (isinstance(size, str) and re.fullmatch(r"\d+[kmgt]b?", size, re.IGNORECASE)):
             raise ValueError(f"Invalid java size format for string'{size}'")
         return True
 
@@ -815,7 +816,7 @@ class LivyAsyncHook(HttpAsyncHook, LoggingMixin):
         if (
             vals is None
             or not isinstance(vals, (tuple, list))
-            or any(1 for val in vals if not isinstance(val, (str, int, float)))
+            or not all(isinstance(val, (str, int, float)) for val in vals)
         ):
             raise ValueError("List of strings expected")
         return True
@@ -831,6 +832,6 @@ class LivyAsyncHook(HttpAsyncHook, LoggingMixin):
         if conf:
             if not isinstance(conf, dict):
                 raise ValueError("'conf' argument must be a dict")
-            if any(True for k, v in conf.items() if not (v and isinstance(v, str) or isinstance(v, int))):
+            if not all(isinstance(v, (str, int)) and v != "" for v in conf.values()):
                 raise ValueError("'conf' values must be either strings or ints")
         return True

@@ -15,10 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 """Kubernetes sub-commands."""
+
 from __future__ import annotations
 
 import os
 import sys
+import warnings
 from datetime import datetime, timedelta
 
 from kubernetes import client
@@ -34,6 +36,12 @@ from airflow.providers.cncf.kubernetes.pod_generator import PodGenerator
 from airflow.utils import cli as cli_utils, yaml
 from airflow.utils.cli import get_dag
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
+
+warnings.warn(
+    "Use kubernetes command from providers package, Use cncf.kubernetes provider >= 8.2.1",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 @cli_utils.action_cli
@@ -142,8 +150,8 @@ def cleanup_pods(args):
                     _delete_pod(pod.metadata.name, namespace)
                 except ApiException as e:
                     print(f"Can't remove POD: {e}", file=sys.stderr)
-                continue
-            print(f"No action taken on pod {pod_name}")
+            else:
+                print(f"No action taken on pod {pod_name}")
         continue_token = pod_list.metadata._continue
         if not continue_token:
             break

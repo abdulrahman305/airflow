@@ -30,16 +30,14 @@ from copy import copy
 from queue import SimpleQueue
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
 
 from airflow.configuration import conf
 from airflow.jobs.base_job_runner import BaseJobRunner
-from airflow.jobs.job import Job, perform_heartbeat
+from airflow.jobs.job import perform_heartbeat
 from airflow.models.trigger import Trigger
-from airflow.serialization.pydantic.job import JobPydantic
 from airflow.stats import Stats
-from airflow.triggers.base import BaseTrigger, TriggerEvent
+from airflow.triggers.base import TriggerEvent
 from airflow.typing_compat import TypedDict
 from airflow.utils import timezone
 from airflow.utils.log.file_task_handler import FileTaskHandler
@@ -58,7 +56,11 @@ from airflow.utils.module_loading import import_string
 from airflow.utils.session import NEW_SESSION, provide_session
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from airflow.jobs.job import Job
     from airflow.models import TaskInstance
+    from airflow.triggers.base import BaseTrigger
 
 HANDLER_SUPPORTS_TRIGGERER = False
 """
@@ -129,7 +131,9 @@ def configure_trigger_log_handler():
                     f"Handler {h.__class__.__name__} does not support "
                     "individual trigger logging. Please check the release notes "
                     "for your provider to see if a newer version supports "
-                    "individual trigger logging."
+                    "individual trigger logging.",
+                    category=UserWarning,
+                    stacklevel=3,
                 )
             if supports_triggerer(h):
                 return h
@@ -146,7 +150,11 @@ def configure_trigger_log_handler():
             if h:
                 logger.debug("Using logging configuration from `airflow.task`")
         if not h:
-            warnings.warn("Could not find log handler suitable for individual trigger logging.")
+            warnings.warn(
+                "Could not find log handler suitable for individual trigger logging.",
+                category=UserWarning,
+                stacklevel=3,
+            )
             return None
         return h
 
@@ -234,7 +242,7 @@ def setup_queue_listener():
         return None
 
 
-class TriggererJobRunner(BaseJobRunner["Job | JobPydantic"], LoggingMixin):
+class TriggererJobRunner(BaseJobRunner, LoggingMixin):
     """
     Run active triggers in asyncio and update their dependent tests/DAGs once their events have fired.
 
@@ -247,7 +255,7 @@ class TriggererJobRunner(BaseJobRunner["Job | JobPydantic"], LoggingMixin):
 
     def __init__(
         self,
-        job: Job | JobPydantic,
+        job: Job,
         capacity=None,
     ):
         super().__init__(job)
@@ -298,7 +306,7 @@ class TriggererJobRunner(BaseJobRunner["Job | JobPydantic"], LoggingMixin):
 
         This is used for the warning boxes in the UI.
         """
-        return session.query(func.count(Trigger.id)).scalar() > 0
+        return session.execute(select(func.count(Trigger.id))).scalar_one() > 0
 
     def on_kill(self):
         """
@@ -465,8 +473,8 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         """
         watchdog = asyncio.create_task(self.block_watchdog())
         last_status = time.time()
-        while not self.stop:
-            try:
+        try:
+            while not self.stop:
                 # Run core logic
                 await self.create_triggers()
                 await self.cancel_triggers()
@@ -478,9 +486,9 @@ class TriggerRunner(threading.Thread, LoggingMixin):
                     count = len(self.triggers)
                     self.log.info("%i triggers currently running", count)
                     last_status = time.time()
-            except Exception:
-                self.stop = True
-                raise
+        except Exception:
+            self.stop = True
+            raise
         # Wait for watchdog to complete
         await watchdog
 
@@ -489,15 +497,11 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         while self.to_create:
             trigger_id, trigger_instance = self.to_create.popleft()
             if trigger_id not in self.triggers:
-                task_instance: TaskInstance = trigger_instance.task_instance
-                dag_id = task_instance.dag_id
-                run_id = task_instance.run_id
-                task_id = task_instance.task_id
-                map_index = task_instance.map_index
-                try_number = task_instance.try_number
+                ti: TaskInstance = trigger_instance.task_instance
                 self.triggers[trigger_id] = {
                     "task": asyncio.create_task(self.run_trigger(trigger_id, trigger_instance)),
-                    "name": f"{dag_id}/{run_id}/{task_id}/{map_index}/{try_number} (ID {trigger_id})",
+                    "name": f"{ti.dag_id}/{ti.run_id}/{ti.task_id}/{ti.map_index}/{ti.try_number} "
+                    f"(ID {trigger_id})",
                     "events": 0,
                 }
             else:
@@ -508,7 +512,7 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         """
         Drain the to_cancel queue and ensure all triggers that are not in the DB are cancelled.
 
-        This allows the the cleanup job to delete them.
+        This allows the cleanup job to delete them.
         """
         while self.to_cancel:
             trigger_id = self.to_cancel.popleft()
@@ -604,12 +608,11 @@ class TriggerRunner(threading.Thread, LoggingMixin):
                 self.log.info("Trigger %s fired: %s", self.triggers[trigger_id]["name"], event)
                 self.triggers[trigger_id]["events"] += 1
                 self.events.append((trigger_id, event))
-        except asyncio.CancelledError as err:
+        except asyncio.CancelledError:
             if timeout := trigger.task_instance.trigger_timeout:
                 timeout = timeout.replace(tzinfo=timezone.utc) if not timeout.tzinfo else timeout
                 if timeout < timezone.utcnow():
                     self.log.error("Trigger cancelled due to timeout")
-            self.log.error("Trigger cancelled; message=%s", err)
             raise
         finally:
             # CancelledError will get injected when we're stopped - which is
@@ -675,6 +678,20 @@ class TriggerRunner(threading.Thread, LoggingMixin):
                 self.failed_triggers.append((new_id, e))
                 continue
 
+            # If new_trigger_orm.task_instance is None, this means the TaskInstance
+            # row was updated by either Trigger.submit_event or Trigger.submit_failure
+            # and can happen when a single trigger Job is being run on multiple TriggerRunners
+            # in a High-Availability setup.
+            if new_trigger_orm.task_instance is None:
+                self.log.info(
+                    (
+                        "TaskInstance for Trigger ID %s is None. It was likely updated by another trigger job. "
+                        "Skipping trigger instantiation."
+                    ),
+                    new_id,
+                )
+                continue
+
             try:
                 new_trigger_instance = trigger_class(**new_trigger_orm.kwargs)
             except TypeError as err:
@@ -685,8 +702,7 @@ class TriggerRunner(threading.Thread, LoggingMixin):
             self.set_trigger_logging_metadata(new_trigger_orm.task_instance, new_id, new_trigger_instance)
             self.to_create.append((new_id, new_trigger_instance))
         # Enqueue orphaned triggers for cancellation
-        for old_id in cancel_trigger_ids:
-            self.to_cancel.append(old_id)
+        self.to_cancel.extend(cancel_trigger_ids)
 
     def set_trigger_logging_metadata(self, ti: TaskInstance, trigger_id, trigger):
         """

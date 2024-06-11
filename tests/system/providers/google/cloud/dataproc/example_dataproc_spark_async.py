@@ -18,12 +18,13 @@
 """
 Example Airflow DAG for DataprocSubmitJobOperator with async spark job.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.dataproc import (
     DataprocCreateClusterOperator,
     DataprocDeleteClusterOperator,
@@ -31,10 +32,11 @@ from airflow.providers.google.cloud.operators.dataproc import (
 )
 from airflow.providers.google.cloud.sensors.dataproc import DataprocJobSensor
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 DAG_ID = "dataproc_spark_async"
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 CLUSTER_NAME = f"cluster-{ENV_ID}-{DAG_ID}".replace("_", "-")
 REGION = "europe-west1"
@@ -44,12 +46,12 @@ CLUSTER_CONFIG = {
     "master_config": {
         "num_instances": 1,
         "machine_type_uri": "n1-standard-4",
-        "disk_config": {"boot_disk_type": "pd-standard", "boot_disk_size_gb": 1024},
+        "disk_config": {"boot_disk_type": "pd-standard", "boot_disk_size_gb": 32},
     },
     "worker_config": {
         "num_instances": 2,
         "machine_type_uri": "n1-standard-4",
-        "disk_config": {"boot_disk_type": "pd-standard", "boot_disk_size_gb": 1024},
+        "disk_config": {"boot_disk_type": "pd-standard", "boot_disk_size_gb": 32},
     },
 }
 
@@ -64,7 +66,7 @@ SPARK_JOB = {
 }
 
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),

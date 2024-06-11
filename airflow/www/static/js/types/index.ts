@@ -34,7 +34,6 @@ type TaskState =
   | RunState
   | "removed"
   | "scheduled"
-  | "shutdown"
   | "restarting"
   | "up_for_retry"
   | "up_for_reschedule"
@@ -136,14 +135,15 @@ interface DepNode {
     id?: string;
     class: "dag" | "dataset" | "trigger" | "sensor";
     label: string;
-    rx: number;
-    ry: number;
+    rx?: number;
+    ry?: number;
     isOpen?: boolean;
     isJoinNode?: boolean;
     childCount?: number;
-    labelStyle: string;
-    style: string;
+    labelStyle?: string;
+    style?: string;
     setupTeardownType?: "setup" | "teardown";
+    isMapped?: boolean;
   };
   children?: DepNode[];
   edges?: MidEdge[];
@@ -166,6 +166,8 @@ export interface EdgeData {
     layoutOptions?: LayoutOptions;
     isSetupTeardown?: boolean;
     parentNode?: string;
+    isZoomedOut?: boolean;
+    isSourceDataset?: boolean;
   };
 }
 
@@ -181,6 +183,7 @@ export interface WebserverEdge {
   targetId: string;
   isSetupTeardown?: boolean;
   parentNode?: string;
+  isSourceDataset?: boolean;
 }
 
 interface DatasetListItem extends API.Dataset {

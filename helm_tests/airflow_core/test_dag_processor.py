@@ -69,13 +69,36 @@ class TestDagProcessor:
         )
         assert actual is None
 
+    def test_wait_for_migration_security_contexts_are_configurable(self):
+        docs = render_chart(
+            values={
+                "dagProcessor": {
+                    "enabled": True,
+                    "waitForMigrations": {
+                        "enabled": True,
+                        "securityContexts": {
+                            "container": {
+                                "allowPrivilegeEscalation": False,
+                                "readOnlyRootFilesystem": True,
+                            },
+                        },
+                    },
+                },
+            },
+            show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
+        )
+
+        assert {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True} == jmespath.search(
+            "spec.template.spec.initContainers[0].securityContext", docs[0]
+        )
+
     def test_should_add_extra_containers(self):
         docs = render_chart(
             values={
                 "dagProcessor": {
                     "enabled": True,
                     "extraContainers": [
-                        {"name": "test-container", "image": "test-registry/test-repo:test-tag"}
+                        {"name": "{{ .Chart.Name }}", "image": "test-registry/test-repo:test-tag"}
                     ],
                 },
             },
@@ -83,9 +106,24 @@ class TestDagProcessor:
         )
 
         assert {
-            "name": "test-container",
+            "name": "airflow",
             "image": "test-registry/test-repo:test-tag",
         } == jmespath.search("spec.template.spec.containers[-1]", docs[0])
+
+    def test_should_template_extra_containers(self):
+        docs = render_chart(
+            values={
+                "dagProcessor": {
+                    "enabled": True,
+                    "extraContainers": [{"name": "{{ .Release.Name }}-test-container"}],
+                },
+            },
+            show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
+        )
+
+        assert {"name": "release-name-test-container"} == jmespath.search(
+            "spec.template.spec.containers[-1]", docs[0]
+        )
 
     def test_should_add_extra_init_containers(self):
         docs = render_chart(
@@ -104,6 +142,21 @@ class TestDagProcessor:
             "name": "test-init-container",
             "image": "test-registry/test-repo:test-tag",
         } == jmespath.search("spec.template.spec.initContainers[-1]", docs[0])
+
+    def test_should_template_extra_init_containers(self):
+        docs = render_chart(
+            values={
+                "dagProcessor": {
+                    "enabled": True,
+                    "extraInitContainers": [{"name": "{{ .Release.Name }}-test-init-container"}],
+                },
+            },
+            show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
+        )
+
+        assert {"name": "release-name-test-init-container"} == jmespath.search(
+            "spec.template.spec.initContainers[-1]", docs[0]
+        )
 
     def test_should_add_extra_volume_and_extra_volume_mount(self):
         docs = render_chart(
@@ -150,7 +203,17 @@ class TestDagProcessor:
             values={
                 "dagProcessor": {
                     "enabled": True,
-                    "env": [{"name": "TEST_ENV_1", "value": "test_env_1"}],
+                    "env": [
+                        {"name": "TEST_ENV_1", "value": "test_env_1"},
+                        {
+                            "name": "TEST_ENV_2",
+                            "valueFrom": {"secretKeyRef": {"name": "my-secret", "key": "my-key"}},
+                        },
+                        {
+                            "name": "TEST_ENV_3",
+                            "valueFrom": {"configMapKeyRef": {"name": "my-config-map", "key": "my-key"}},
+                        },
+                    ],
                 },
             },
             show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
@@ -159,6 +222,14 @@ class TestDagProcessor:
         assert {"name": "TEST_ENV_1", "value": "test_env_1"} in jmespath.search(
             "spec.template.spec.containers[0].env", docs[0]
         )
+        assert {
+            "name": "TEST_ENV_2",
+            "valueFrom": {"secretKeyRef": {"name": "my-secret", "key": "my-key"}},
+        } in jmespath.search("spec.template.spec.containers[0].env", docs[0])
+        assert {
+            "name": "TEST_ENV_3",
+            "valueFrom": {"configMapKeyRef": {"name": "my-config-map", "key": "my-key"}},
+        } in jmespath.search("spec.template.spec.containers[0].env", docs[0])
 
     def test_should_add_extraEnvs_to_wait_for_migration_container(self):
         docs = render_chart(
@@ -175,6 +246,17 @@ class TestDagProcessor:
 
         assert {"name": "TEST_ENV_1", "value": "test_env_1"} in jmespath.search(
             "spec.template.spec.initContainers[0].env", docs[0]
+        )
+
+    def test_scheduler_name(self):
+        docs = render_chart(
+            values={"dagProcessor": {"enabled": True}, "schedulerName": "airflow-scheduler"},
+            show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
+        )
+
+        assert "airflow-scheduler" == jmespath.search(
+            "spec.template.spec.schedulerName",
+            docs[0],
         )
 
     def test_should_create_valid_affinity_tolerations_and_node_selector(self):
@@ -357,20 +439,27 @@ class TestDagProcessor:
         )
 
     @pytest.mark.parametrize(
-        "log_persistence_values, expected_volume",
+        "log_values, expected_volume",
         [
-            ({"enabled": False}, {"emptyDir": {}}),
-            ({"enabled": True}, {"persistentVolumeClaim": {"claimName": "release-name-logs"}}),
+            ({"persistence": {"enabled": False}}, {"emptyDir": {}}),
             (
-                {"enabled": True, "existingClaim": "test-claim"},
+                {"persistence": {"enabled": False}, "emptyDirConfig": {"sizeLimit": "10Gi"}},
+                {"emptyDir": {"sizeLimit": "10Gi"}},
+            ),
+            (
+                {"persistence": {"enabled": True}},
+                {"persistentVolumeClaim": {"claimName": "release-name-logs"}},
+            ),
+            (
+                {"persistence": {"enabled": True, "existingClaim": "test-claim"}},
                 {"persistentVolumeClaim": {"claimName": "test-claim"}},
             ),
         ],
     )
-    def test_logs_persistence_changes_volume(self, log_persistence_values, expected_volume):
+    def test_logs_persistence_changes_volume(self, log_values, expected_volume):
         docs = render_chart(
             values={
-                "logs": {"persistence": log_persistence_values},
+                "logs": log_values,
                 "dagProcessor": {"enabled": True},
             },
             show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
@@ -468,7 +557,7 @@ class TestDagProcessor:
             values=values,
             show_only=["templates/dag-processor/dag-processor-deployment.yaml"],
         )
-        expected_result = revision_history_limit if revision_history_limit else global_revision_history_limit
+        expected_result = revision_history_limit or global_revision_history_limit
         assert jmespath.search("spec.revisionHistoryLimit", docs[0]) == expected_result
 
     @pytest.mark.parametrize("command", [None, ["custom", "command"]])
@@ -641,7 +730,7 @@ class TestDagProcessorServiceAccount:
         )
         assert jmespath.search("automountServiceAccountToken", docs[0]) is True
 
-    def test_overriden_automount_service_account_token(self):
+    def test_overridden_automount_service_account_token(self):
         docs = render_chart(
             values={
                 "dagProcessor": {

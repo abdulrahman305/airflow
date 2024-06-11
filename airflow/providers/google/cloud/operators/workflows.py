@@ -24,10 +24,8 @@ from typing import TYPE_CHECKING, Sequence
 
 from google.api_core.exceptions import AlreadyExists
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
-from google.api_core.retry import Retry
 from google.cloud.workflows.executions_v1beta import Execution
 from google.cloud.workflows_v1beta import Workflow
-from google.protobuf.field_mask_pb2 import FieldMask
 
 from airflow.providers.google.cloud.hooks.workflows import WorkflowsHook
 from airflow.providers.google.cloud.links.workflows import (
@@ -36,14 +34,15 @@ from airflow.providers.google.cloud.links.workflows import (
     WorkflowsWorkflowDetailsLink,
 )
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
+from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 
 if TYPE_CHECKING:
+    from google.api_core.retry import Retry
+    from google.protobuf.field_mask_pb2 import FieldMask
+
     from airflow.utils.context import Context
-try:
-    from airflow.utils.hashlib_wrapper import md5
-except ModuleNotFoundError:
-    # Remove when Airflow providers min Airflow version is "2.7.0"
-    from hashlib import md5
+
+from airflow.utils.hashlib_wrapper import md5
 
 
 class WorkflowsCreateWorkflowOperator(GoogleCloudBaseOperator):
@@ -51,7 +50,7 @@ class WorkflowsCreateWorkflowOperator(GoogleCloudBaseOperator):
     Creates a new workflow.
 
     If a workflow with the specified name already exists in the specified
-    project and location, the long running operation will return
+    project and location, the long-running operation will return
     [ALREADY_EXISTS][google.rpc.Code.ALREADY_EXISTS] error.
 
     .. seealso::
@@ -79,7 +78,7 @@ class WorkflowsCreateWorkflowOperator(GoogleCloudBaseOperator):
         workflow: dict,
         workflow_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -191,7 +190,7 @@ class WorkflowsUpdateWorkflowOperator(GoogleCloudBaseOperator):
         *,
         workflow_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         update_mask: FieldMask | None = None,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
@@ -269,7 +268,7 @@ class WorkflowsDeleteWorkflowOperator(GoogleCloudBaseOperator):
         *,
         workflow_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -331,7 +330,7 @@ class WorkflowsListWorkflowsOperator(GoogleCloudBaseOperator):
         self,
         *,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         filter_: str | None = None,
         order_by: str | None = None,
         retry: Retry | _MethodDefault = DEFAULT,
@@ -401,7 +400,7 @@ class WorkflowsGetWorkflowOperator(GoogleCloudBaseOperator):
         *,
         workflow_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -472,7 +471,7 @@ class WorkflowsCreateExecutionOperator(GoogleCloudBaseOperator):
         workflow_id: str,
         execution: dict,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -547,7 +546,7 @@ class WorkflowsCancelExecutionOperator(GoogleCloudBaseOperator):
         workflow_id: str,
         execution_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -605,7 +604,8 @@ class WorkflowsListExecutionsOperator(GoogleCloudBaseOperator):
 
     :param workflow_id: Required. The ID of the workflow to be created.
     :param start_date_filter: If passed only executions older that this date will be returned.
-        By default operators return executions from last 60 minutes
+        By default, operators return executions from last 60 minutes.
+        Note that datetime object must specify a time zone, e.g. ``datetime.timezone.utc``.
     :param project_id: Required. The ID of the Google Cloud project the cluster belongs to.
     :param location: Required. The GCP region in which to handle the request.
     :param retry: A retry object used to retry requests. If ``None`` is specified, requests will not be
@@ -624,7 +624,7 @@ class WorkflowsListExecutionsOperator(GoogleCloudBaseOperator):
         workflow_id: str,
         location: str,
         start_date_filter: datetime.datetime | None = None,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
@@ -669,7 +669,7 @@ class WorkflowsListExecutionsOperator(GoogleCloudBaseOperator):
         return [
             Execution.to_dict(e)
             for e in execution_iter
-            if e.start_time.ToDatetime(tzinfo=datetime.timezone.utc) > self.start_date_filter
+            if e.start_time > self.start_date_filter  # type: ignore
         ]
 
 
@@ -701,7 +701,7 @@ class WorkflowsGetExecutionOperator(GoogleCloudBaseOperator):
         workflow_id: str,
         execution_id: str,
         location: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),

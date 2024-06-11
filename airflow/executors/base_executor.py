@@ -15,20 +15,19 @@
 # specific language governing permissions and limitations
 # under the License.
 """Base executor - this is the base class for all the implemented executors."""
+
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
 import pendulum
 
-from airflow.cli.cli_config import DefaultHelpParser, GroupCommand
+from airflow.cli.cli_config import DefaultHelpParser
 from airflow.configuration import conf
 from airflow.exceptions import RemovedInAirflow3Warning
 from airflow.stats import Stats
@@ -38,8 +37,13 @@ from airflow.utils.state import TaskInstanceState
 PARALLELISM: int = conf.getint("core", "PARALLELISM")
 
 if TYPE_CHECKING:
+    import argparse
+    from datetime import datetime
+
     from airflow.callbacks.base_callback_sink import BaseCallbackSink
     from airflow.callbacks.callback_requests import CallbackRequest
+    from airflow.cli.cli_config import GroupCommand
+    from airflow.executors.executor_utils import ExecutorName
     from airflow.models.taskinstance import TaskInstance
     from airflow.models.taskinstancekey import TaskInstanceKey
 
@@ -116,12 +120,13 @@ class BaseExecutor(LoggingMixin):
     serve_logs: bool = False
 
     job_id: None | int | str = None
+    name: None | ExecutorName = None
     callback_sink: BaseCallbackSink | None = None
 
     def __init__(self, parallelism: int = PARALLELISM):
         super().__init__()
         self.parallelism: int = parallelism
-        self.queued_tasks: OrderedDict[TaskInstanceKey, QueuedTaskInstanceType] = OrderedDict()
+        self.queued_tasks: dict[TaskInstanceKey, QueuedTaskInstanceType] = {}
         self.running: set[TaskInstanceKey] = set()
         self.event_buffer: dict[TaskInstanceKey, EventBufferValueType] = {}
         self.attempts: dict[TaskInstanceKey, RunningRetryAttemptType] = defaultdict(RunningRetryAttemptType)
@@ -160,12 +165,11 @@ class BaseExecutor(LoggingMixin):
         cfg_path: str | None = None,
     ) -> None:
         """Queues task instance."""
+        if TYPE_CHECKING:
+            assert task_instance.task
+
         pool = pool or task_instance.pool
 
-        # TODO (edgarRd): AIRFLOW-1985:
-        # cfg_path is needed to propagate the config values if using impersonation
-        # (run_as_user), given that there are different code paths running tasks.
-        # For a long term solution we need to address AIRFLOW-1986
         command_list_to_run = task_instance.command_as_list(
             local=True,
             mark_success=mark_success,
@@ -176,13 +180,16 @@ class BaseExecutor(LoggingMixin):
             ignore_ti_state=ignore_ti_state,
             pool=pool,
             pickle_id=pickle_id,
+            # cfg_path is needed to propagate the config values if using impersonation
+            # (run_as_user), given that there are different code paths running tasks.
+            # https://github.com/apache/airflow/pull/2991
             cfg_path=cfg_path,
         )
         self.log.debug("created command %s", command_list_to_run)
         self.queue_command(
             task_instance,
             command_list_to_run,
-            priority=task_instance.task.priority_weight_total,
+            priority=task_instance.priority_weight,
             queue=task_instance.task.queue,
         )
 
@@ -296,19 +303,23 @@ class BaseExecutor(LoggingMixin):
             self.execute_async(key=key, command=command, queue=queue, executor_config=executor_config)
             self.running.add(key)
 
-    def change_state(self, key: TaskInstanceKey, state: TaskInstanceState, info=None) -> None:
+    def change_state(
+        self, key: TaskInstanceKey, state: TaskInstanceState, info=None, remove_running=True
+    ) -> None:
         """
         Change state of the task.
 
-        :param info: Executor information for the task instance
         :param key: Unique key for the task instance
         :param state: State to set for the task.
+        :param info: Executor information for the task instance
+        :param remove_running: Whether or not to remove the TI key from running set
         """
         self.log.debug("Changing state: %s", key)
-        try:
-            self.running.remove(key)
-        except KeyError:
-            self.log.debug("Could not find key: %s", str(key))
+        if remove_running:
+            try:
+                self.running.remove(key)
+            except KeyError:
+                self.log.debug("Could not find key: %s", key)
         self.event_buffer[key] = state, info
 
     def fail(self, key: TaskInstanceKey, info=None) -> None:
@@ -328,6 +339,24 @@ class BaseExecutor(LoggingMixin):
         :param key: Unique key for the task instance
         """
         self.change_state(key, TaskInstanceState.SUCCESS, info)
+
+    def queued(self, key: TaskInstanceKey, info=None) -> None:
+        """
+        Set queued state for the event.
+
+        :param info: Executor information for the task instance
+        :param key: Unique key for the task instance
+        """
+        self.change_state(key, TaskInstanceState.QUEUED, info)
+
+    def running_state(self, key: TaskInstanceKey, info=None) -> None:
+        """
+        Set running state for the event.
+
+        :param info: Executor information for the task instance
+        :param key: Unique key for the task instance
+        """
+        self.change_state(key, TaskInstanceState.RUNNING, info, remove_running=False)
 
     def get_event_buffer(self, dag_ids=None) -> dict[TaskInstanceKey, EventBufferValueType]:
         """
@@ -488,6 +517,7 @@ class BaseExecutor(LoggingMixin):
 
         Override this method to expose commands via Airflow CLI to manage this executor. This can
         be commands to setup/teardown the executor, inspect state, etc.
+        Make sure to choose unique names for those commands, to avoid collisions.
         """
         return []
 

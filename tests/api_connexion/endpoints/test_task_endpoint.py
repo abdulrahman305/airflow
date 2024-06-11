@@ -22,14 +22,16 @@ from datetime import datetime
 
 import pytest
 
-from airflow import DAG
 from airflow.models import DagBag
+from airflow.models.dag import DAG
 from airflow.models.expandinput import EXPAND_INPUT_EMPTY
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.operators.empty import EmptyOperator
 from airflow.security import permissions
 from tests.test_utils.api_connexion_utils import assert_401, create_user, delete_user
 from tests.test_utils.db import clear_db_dags, clear_db_runs, clear_db_serialized_dags
+
+pytestmark = pytest.mark.db_test
 
 
 @pytest.fixture(scope="module")
@@ -127,6 +129,7 @@ class TestGetTask(TestTaskEndpoint):
             "retry_exponential_backoff": False,
             "start_date": "2020-06-15T00:00:00+00:00",
             "task_id": "op1",
+            "task_display_name": "op1",
             "template_fields": [],
             "trigger_rule": "all_success",
             "ui_color": "#e8f7e4",
@@ -134,6 +137,7 @@ class TestGetTask(TestTaskEndpoint):
             "wait_for_downstream": False,
             "weight_rule": "downstream",
             "is_mapped": False,
+            "doc_md": None,
         }
         response = self.client.get(
             f"/api/v1/dags/{self.dag_id}/tasks/{self.task_id}", environ_overrides={"REMOTE_USER": "test"}
@@ -162,12 +166,14 @@ class TestGetTask(TestTaskEndpoint):
             "retry_exponential_backoff": False,
             "start_date": "2020-06-15T00:00:00+00:00",
             "task_id": "mapped_task",
+            "task_display_name": "mapped_task",
             "template_fields": [],
             "trigger_rule": "all_success",
             "ui_color": "#e8f7e4",
             "ui_fgcolor": "#000",
             "wait_for_downstream": False,
             "weight_rule": "downstream",
+            "doc_md": None,
         }
         response = self.client.get(
             f"/api/v1/dags/{self.mapped_dag_id}/tasks/{self.mapped_task_id}",
@@ -177,7 +183,6 @@ class TestGetTask(TestTaskEndpoint):
         assert response.json == expected
 
     def test_should_respond_200_serialized(self):
-
         # Get the dag out of the dagbag before we patch it to an empty one
         SerializedDagModel.write_dag(self.app.dag_bag.get_dag(self.dag_id))
 
@@ -214,6 +219,7 @@ class TestGetTask(TestTaskEndpoint):
             "retry_exponential_backoff": False,
             "start_date": "2020-06-15T00:00:00+00:00",
             "task_id": "op1",
+            "task_display_name": "op1",
             "template_fields": [],
             "trigger_rule": "all_success",
             "ui_color": "#e8f7e4",
@@ -221,6 +227,7 @@ class TestGetTask(TestTaskEndpoint):
             "wait_for_downstream": False,
             "weight_rule": "downstream",
             "is_mapped": False,
+            "doc_md": None,
         }
         response = self.client.get(
             f"/api/v1/dags/{self.dag_id}/tasks/{self.task_id}", environ_overrides={"REMOTE_USER": "test"}
@@ -235,6 +242,14 @@ class TestGetTask(TestTaskEndpoint):
             f"/api/v1/dags/{self.dag_id}/tasks/{task_id}", environ_overrides={"REMOTE_USER": "test"}
         )
         assert response.status_code == 404
+
+    def test_should_respond_404_when_dag_not_found(self):
+        dag_id = "xxxx_not_existing"
+        response = self.client.get(
+            f"/api/v1/dags/{dag_id}/tasks/{self.task_id}", environ_overrides={"REMOTE_USER": "test"}
+        )
+        assert response.status_code == 404
+        assert response.json["title"] == "DAG not found"
 
     def test_should_raises_401_unauthenticated(self):
         response = self.client.get(f"/api/v1/dags/{self.dag_id}/tasks/{self.task_id}")
@@ -281,6 +296,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "retry_exponential_backoff": False,
                     "start_date": "2020-06-15T00:00:00+00:00",
                     "task_id": "op1",
+                    "task_display_name": "op1",
                     "template_fields": [],
                     "trigger_rule": "all_success",
                     "ui_color": "#e8f7e4",
@@ -288,6 +304,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "wait_for_downstream": False,
                     "weight_rule": "downstream",
                     "is_mapped": False,
+                    "doc_md": None,
                 },
                 {
                     "class_ref": {
@@ -311,6 +328,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "retry_exponential_backoff": False,
                     "start_date": "2020-06-16T00:00:00+00:00",
                     "task_id": self.task_id2,
+                    "task_display_name": self.task_id2,
                     "template_fields": [],
                     "trigger_rule": "all_success",
                     "ui_color": "#e8f7e4",
@@ -318,6 +336,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "wait_for_downstream": False,
                     "weight_rule": "downstream",
                     "is_mapped": False,
+                    "doc_md": None,
                 },
             ],
             "total_entries": 2,
@@ -351,12 +370,14 @@ class TestGetTasks(TestTaskEndpoint):
                     "retry_exponential_backoff": False,
                     "start_date": "2020-06-15T00:00:00+00:00",
                     "task_id": "mapped_task",
+                    "task_display_name": "mapped_task",
                     "template_fields": [],
                     "trigger_rule": "all_success",
                     "ui_color": "#e8f7e4",
                     "ui_fgcolor": "#000",
                     "wait_for_downstream": False,
                     "weight_rule": "downstream",
+                    "doc_md": None,
                 },
                 {
                     "class_ref": {
@@ -380,6 +401,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "retry_exponential_backoff": False,
                     "start_date": "2020-06-15T00:00:00+00:00",
                     "task_id": self.task_id3,
+                    "task_display_name": self.task_id3,
                     "template_fields": [],
                     "trigger_rule": "all_success",
                     "ui_color": "#e8f7e4",
@@ -387,6 +409,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "wait_for_downstream": False,
                     "weight_rule": "downstream",
                     "is_mapped": False,
+                    "doc_md": None,
                 },
             ],
             "total_entries": 2,

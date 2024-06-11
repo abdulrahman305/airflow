@@ -16,9 +16,10 @@
 # specific language governing permissions and limitations
 # under the License.
 """This module contains Google Dataproc Metastore operators."""
+
 from __future__ import annotations
 
-from time import sleep
+import time
 from typing import TYPE_CHECKING, Sequence
 
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
@@ -26,10 +27,9 @@ from google.api_core.retry import Retry, exponential_sleep_generator
 from google.cloud.metastore_v1 import MetadataExport, MetadataManagementActivity
 from google.cloud.metastore_v1.types import Backup, MetadataImport, Service
 from google.cloud.metastore_v1.types.metastore import DatabaseDumpSpec, Restore
-from google.protobuf.field_mask_pb2 import FieldMask
 from googleapiclient.errors import HttpError
 
-from airflow import AirflowException
+from airflow.exceptions import AirflowException
 from airflow.models import BaseOperator, BaseOperatorLink
 from airflow.models.xcom import XCom
 from airflow.providers.google.cloud.hooks.dataproc_metastore import DataprocMetastoreHook
@@ -37,6 +37,8 @@ from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseO
 from airflow.providers.google.common.links.storage import StorageLink
 
 if TYPE_CHECKING:
+    from google.protobuf.field_mask_pb2 import FieldMask
+
     from airflow.models.taskinstancekey import TaskInstanceKey
     from airflow.utils.context import Context
 
@@ -429,7 +431,7 @@ class DataprocMetastoreCreateServiceOperator(GoogleCloudBaseOperator):
         hook = DataprocMetastoreHook(
             gcp_conn_id=self.gcp_conn_id, impersonation_chain=self.impersonation_chain
         )
-        self.log.info("Creating Dataproc Metastore service: %s", self.project_id)
+        self.log.info("Creating Dataproc Metastore service: %s", self.service_id)
         try:
             operation = hook.create_service(
                 region=self.region,
@@ -546,13 +548,24 @@ class DataprocMetastoreDeleteBackupOperator(GoogleCloudBaseOperator):
 class DataprocMetastoreDeleteServiceOperator(GoogleCloudBaseOperator):
     """Delete a single service.
 
-    :param request:  The request object. Request message for
-        [DataprocMetastore.DeleteService][google.cloud.metastore.v1.DataprocMetastore.DeleteService].
+    :param region: Required. The ID of the Google Cloud region that the service belongs to.
     :param project_id: Required. The ID of the Google Cloud project that the service belongs to.
+    :param service_id:  Required. The ID of the metastore service, which is used as the final component of
+        the metastore service's name. This value must be between 2 and 63 characters long inclusive, begin
+        with a letter, end with a letter or number, and consist of alphanumeric ASCII characters or
+        hyphens.
     :param retry: Designation of what errors, if any, should be retried.
     :param timeout: The timeout for this request.
     :param metadata: Strings which should be sent along with the request as metadata.
-    :param gcp_conn_id:
+    :param gcp_conn_id: The connection ID to use connecting to Google Cloud.
+    :param impersonation_chain: Optional service account to impersonate using short-term
+        credentials, or chained list of accounts required to get the access_token
+        of the last account in the list, which will be impersonated in the request.
+        If set as a string, the account must grant the originating account
+        the Service Account Token Creator IAM role.
+        If set as a sequence, the identities from the list must grant
+        Service Account Token Creator IAM role to the directly preceding identity, with first
+        account from the list granting this role to the originating account (templated).
     """
 
     template_fields: Sequence[str] = (
@@ -587,7 +600,7 @@ class DataprocMetastoreDeleteServiceOperator(GoogleCloudBaseOperator):
         hook = DataprocMetastoreHook(
             gcp_conn_id=self.gcp_conn_id, impersonation_chain=self.impersonation_chain
         )
-        self.log.info("Deleting Dataproc Metastore service: %s", self.project_id)
+        self.log.info("Deleting Dataproc Metastore service: %s", self.service_id)
         operation = hook.delete_service(
             region=self.region,
             project_id=self.project_id,
@@ -597,7 +610,7 @@ class DataprocMetastoreDeleteServiceOperator(GoogleCloudBaseOperator):
             metadata=self.metadata,
         )
         hook.wait_for_operation(self.timeout, operation)
-        self.log.info("Service %s deleted successfully", self.project_id)
+        self.log.info("Service %s deleted successfully", self.service_id)
 
 
 class DataprocMetastoreExportMetadataOperator(GoogleCloudBaseOperator):
@@ -699,7 +712,7 @@ class DataprocMetastoreExportMetadataOperator(GoogleCloudBaseOperator):
         the SDK.
         """
         for time_to_wait in exponential_sleep_generator(initial=10, maximum=120):
-            sleep(time_to_wait)
+            time.sleep(time_to_wait)
             service = hook.get_service(
                 region=self.region,
                 project_id=self.project_id,
@@ -985,7 +998,7 @@ class DataprocMetastoreRestoreServiceOperator(GoogleCloudBaseOperator):
         the SDK.
         """
         for time_to_wait in exponential_sleep_generator(initial=10, maximum=120):
-            sleep(time_to_wait)
+            time.sleep(time_to_wait)
             service = hook.get_service(
                 region=self.region,
                 project_id=self.project_id,

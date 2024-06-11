@@ -24,9 +24,8 @@ import boto3
 import pytest
 from slugify import slugify
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowSkipException
 from airflow.providers.amazon.aws.sensors.ecs import (
-    DEFAULT_CONN_ID,
     EcsBaseSensor,
     EcsClusterStates,
     EcsClusterStateSensor,
@@ -35,6 +34,7 @@ from airflow.providers.amazon.aws.sensors.ecs import (
     EcsTaskDefinitionStateSensor,
     EcsTaskStates,
     EcsTaskStateSensor,
+    _check_failed,
 )
 from airflow.utils import timezone
 from airflow.utils.types import NOTSET
@@ -74,18 +74,18 @@ class TestEcsBaseSensor(EcsBaseTestCase):
     @pytest.mark.parametrize("region_name", [None, NOTSET, "ca-central-1"])
     def test_initialise_operator(self, aws_conn_id, region_name):
         """Test sensor initialize."""
-        op_kw = {"aws_conn_id": aws_conn_id, "region": region_name}
+        op_kw = {"aws_conn_id": aws_conn_id, "region_name": region_name}
         op_kw = {k: v for k, v in op_kw.items() if v is not NOTSET}
         op = EcsBaseSensor(task_id="test_ecs_base", **op_kw)
 
-        assert op.aws_conn_id == (aws_conn_id if aws_conn_id is not NOTSET else DEFAULT_CONN_ID)
-        assert op.region == (region_name if region_name is not NOTSET else None)
+        assert op.aws_conn_id == (aws_conn_id if aws_conn_id is not NOTSET else "aws_default")
+        assert op.region_name == (region_name if region_name is not NOTSET else None)
 
     @pytest.mark.parametrize("aws_conn_id", [None, NOTSET, "aws_test_conn"])
     @pytest.mark.parametrize("region_name", [None, NOTSET, "ca-central-1"])
     def test_hook_and_client(self, aws_conn_id, region_name):
         """Test initialize ``EcsHook`` and ``boto3.client``."""
-        op_kw = {"aws_conn_id": aws_conn_id, "region": region_name}
+        op_kw = {"aws_conn_id": aws_conn_id, "region_name": region_name}
         op_kw = {k: v for k, v in op_kw.items() if v is not NOTSET}
         op = EcsBaseSensor(task_id="test_ecs_base_hook_client", **op_kw)
 
@@ -98,6 +98,7 @@ class TestEcsBaseSensor(EcsBaseTestCase):
         assert client is self.fake_client
 
 
+@pytest.mark.db_test
 class TestEcsClusterStateSensor(EcsBaseTestCase):
     @pytest.mark.parametrize(
         "return_state, expected", [("ACTIVE", True), ("PROVISIONING", False), ("DEPROVISIONING", False)]
@@ -158,6 +159,7 @@ class TestEcsClusterStateSensor(EcsBaseTestCase):
             m.assert_called_once_with(cluster_name=TEST_CLUSTER_NAME)
 
 
+@pytest.mark.db_test
 class TestEcsTaskDefinitionStateSensor(EcsBaseTestCase):
     @pytest.mark.parametrize(
         "return_state, expected", [("ACTIVE", True), ("INACTIVE", False), ("DELETE_IN_PROGRESS", False)]
@@ -190,6 +192,7 @@ class TestEcsTaskDefinitionStateSensor(EcsBaseTestCase):
             m.assert_called_once_with(task_definition=TEST_TASK_DEFINITION_ARN)
 
 
+@pytest.mark.db_test
 class TestEcsTaskStateSensor(EcsBaseTestCase):
     @pytest.mark.parametrize(
         "return_state, expected",
@@ -259,3 +262,20 @@ class TestEcsTaskStateSensor(EcsBaseTestCase):
             with pytest.raises(AirflowException, match="Terminal state reached"):
                 task.poke({})
             m.assert_called_once_with(cluster=TEST_CLUSTER_NAME, task=TEST_TASK_ARN)
+
+
+@pytest.mark.parametrize(
+    "soft_fail, expected_exception", ((False, AirflowException), (True, AirflowSkipException))
+)
+def test_fail__check_failed(soft_fail, expected_exception):
+    current_state = "FAILED"
+    target_state = "SUCCESS"
+    failure_states = ["FAILED"]
+    message = f"Terminal state reached. Current state: {current_state}, Expected state: {target_state}"
+    with pytest.raises(expected_exception, match=message):
+        _check_failed(
+            current_state=current_state,
+            target_state=target_state,
+            failure_states=failure_states,
+            soft_fail=soft_fail,
+        )

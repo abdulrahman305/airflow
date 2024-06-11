@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 import pytest
 from openlineage.client.facet import SchemaDatasetFacet, SchemaField, set_producer
 from openlineage.client.run import Dataset
-from openlineage.common.models import DbColumn, DbTableSchema
 from openlineage.common.sql import DbTableMeta
 from sqlalchemy import Column, MetaData, Table
 
@@ -38,16 +37,6 @@ set_producer(_PRODUCER)
 DB_NAME = "FOOD_DELIVERY"
 DB_SCHEMA_NAME = "PUBLIC"
 DB_TABLE_NAME = DbTableMeta("DISCOUNTS")
-DB_TABLE_COLUMNS = [
-    DbColumn(name="ID", type="int4", ordinal_position=1),
-    DbColumn(name="AMOUNT_OFF", type="int4", ordinal_position=2),
-    DbColumn(name="CUSTOMER_EMAIL", type="varchar", ordinal_position=3),
-    DbColumn(name="STARTS_ON", type="timestamp", ordinal_position=4),
-    DbColumn(name="ENDS_ON", type="timestamp", ordinal_position=5),
-]
-DB_TABLE_SCHEMA = DbTableSchema(
-    schema_name=DB_SCHEMA_NAME, table_name=DB_TABLE_NAME, columns=DB_TABLE_COLUMNS
-)
 
 SCHEMA_FACET = SchemaDatasetFacet(
     fields=[
@@ -262,31 +251,63 @@ def test_get_table_schemas_with_other_database():
 @pytest.mark.parametrize(
     "schema_mapping, expected",
     [
-        pytest.param({None: ["C1", "C2"]}, ["information_schema.columns.table_name IN ('C1', 'C2')"]),
+        pytest.param({None: {None: ["C1", "C2"]}}, "information_schema.columns.table_name IN ('C1', 'C2')"),
         pytest.param(
-            {"Schema1": ["Table1"], "Schema2": ["Table2"]},
-            [
-                "information_schema.columns.table_schema = 'Schema1' AND "
-                "information_schema.columns.table_name IN ('Table1')",
-                "information_schema.columns.table_schema = 'Schema2' AND "
-                "information_schema.columns.table_name IN ('Table2')",
-            ],
+            {None: {"Schema1": ["Table1"], "Schema2": ["Table2"]}},
+            "information_schema.columns.table_schema = 'Schema1' AND "
+            "information_schema.columns.table_name IN ('Table1') OR "
+            "information_schema.columns.table_schema = 'Schema2' AND "
+            "information_schema.columns.table_name IN ('Table2')",
         ),
         pytest.param(
-            {"Schema1": ["Table1", "Table2"]},
-            [
-                "information_schema.columns.table_schema = 'Schema1' AND "
-                "information_schema.columns.table_name IN ('Table1', 'Table2')",
-            ],
+            {None: {"Schema1": ["Table1", "Table2"]}},
+            "information_schema.columns.table_schema = 'Schema1' AND "
+            "information_schema.columns.table_name IN ('Table1', 'Table2')",
+        ),
+        pytest.param(
+            {"Database1": {"Schema1": ["Table1", "Table2"]}},
+            "information_schema.columns.table_database = 'Database1' "
+            "AND information_schema.columns.table_schema = 'Schema1' "
+            "AND information_schema.columns.table_name IN ('Table1', 'Table2')",
+        ),
+        pytest.param(
+            {"Database1": {"Schema1": ["Table1", "Table2"], "Schema2": ["Table3", "Table4"]}},
+            "information_schema.columns.table_database = 'Database1' "
+            "AND (information_schema.columns.table_schema = 'Schema1' "
+            "AND information_schema.columns.table_name IN ('Table1', 'Table2') "
+            "OR information_schema.columns.table_schema = 'Schema2' "
+            "AND information_schema.columns.table_name IN ('Table3', 'Table4'))",
+        ),
+        pytest.param(
+            {"Database1": {"Schema1": ["Table1", "Table2"]}, "Database2": {"Schema2": ["Table3", "Table4"]}},
+            "information_schema.columns.table_database = 'Database1' "
+            "AND information_schema.columns.table_schema = 'Schema1' "
+            "AND information_schema.columns.table_name IN ('Table1', 'Table2') OR "
+            "information_schema.columns.table_database = 'Database2' "
+            "AND information_schema.columns.table_schema = 'Schema2' "
+            "AND information_schema.columns.table_name IN ('Table3', 'Table4')",
         ),
     ],
 )
 def test_create_filter_clauses(schema_mapping, expected):
     information_table = Table(
-        "columns", MetaData(), *[Column("table_name"), Column("table_schema")], schema="information_schema"
+        "columns",
+        MetaData(),
+        *[
+            Column(name)
+            for name in [
+                "table_schema",
+                "table_name",
+                "column_name",
+                "ordinal_position",
+                "udt_name",
+                "table_database",
+            ]
+        ],
+        schema="information_schema",
     )
     clauses = create_filter_clauses(schema_mapping, information_table)
-    assert [str(clause.compile(compile_kwargs={"literal_binds": True})) for clause in clauses] == expected
+    assert str(clauses.compile(compile_kwargs={"literal_binds": True})) == expected
 
 
 def test_create_create_information_schema_query():
@@ -327,17 +348,17 @@ def test_create_create_information_schema_query_cross_db():
             information_schema_table_name="information_schema.columns",
             tables_hierarchy={"db": {"schema1": ["table1"]}, "db2": {"schema1": ["table2"]}},
         )
-        == 'SELECT "db.information_schema".columns.table_schema, "db.information_schema".columns.table_name, '
-        '"db.information_schema".columns.column_name, "db.information_schema".columns.ordinal_position, '
-        '"db.information_schema".columns.data_type \n'
-        'FROM "db.information_schema".columns \n'
-        "WHERE \"db.information_schema\".columns.table_schema = 'schema1' "
-        "AND \"db.information_schema\".columns.table_name IN ('table1') "
+        == "SELECT db.information_schema.columns.table_schema, db.information_schema.columns.table_name, "
+        "db.information_schema.columns.column_name, db.information_schema.columns.ordinal_position, "
+        "db.information_schema.columns.data_type \n"
+        "FROM db.information_schema.columns \n"
+        "WHERE db.information_schema.columns.table_schema = 'schema1' "
+        "AND db.information_schema.columns.table_name IN ('table1') "
         "UNION ALL "
-        'SELECT "db2.information_schema".columns.table_schema, "db2.information_schema".columns.table_name, '
-        '"db2.information_schema".columns.column_name, "db2.information_schema".columns.ordinal_position, '
-        '"db2.information_schema".columns.data_type \n'
-        'FROM "db2.information_schema".columns \n'
-        "WHERE \"db2.information_schema\".columns.table_schema = 'schema1' "
-        "AND \"db2.information_schema\".columns.table_name IN ('table2')"
+        "SELECT db2.information_schema.columns.table_schema, db2.information_schema.columns.table_name, "
+        "db2.information_schema.columns.column_name, db2.information_schema.columns.ordinal_position, "
+        "db2.information_schema.columns.data_type \n"
+        "FROM db2.information_schema.columns \n"
+        "WHERE db2.information_schema.columns.table_schema = 'schema1' "
+        "AND db2.information_schema.columns.table_name IN ('table2')"
     )

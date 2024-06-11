@@ -20,12 +20,11 @@ from __future__ import annotations
 import collections.abc
 import functools
 import operator
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, NamedTuple, Sequence, Sized, Union
+from collections.abc import Sized
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, NamedTuple, Sequence, Union
 
 import attr
 
-from airflow.typing_compat import TypeGuard
-from airflow.utils.context import Context
 from airflow.utils.mixins import ResolveMixin
 from airflow.utils.session import NEW_SESSION, provide_session
 
@@ -34,6 +33,9 @@ if TYPE_CHECKING:
 
     from airflow.models.operator import Operator
     from airflow.models.xcom_arg import XComArg
+    from airflow.serialization.serialized_objects import _ExpandInputRef
+    from airflow.typing_compat import TypeGuard
+    from airflow.utils.context import Context
 
 ExpandInput = Union["DictOfListsExpandInput", "ListOfDictsExpandInput"]
 
@@ -134,6 +136,7 @@ class DictOfListsExpandInput(NamedTuple):
         If any arguments are not known right now (upstream task not finished),
         they will not be present in the dict.
         """
+
         # TODO: This initiates one database call for each XComArg. Would it be
         # more efficient to do one single db call and unpack the value here?
         def _get_length(v: OperatorExpandArgument) -> int | None:
@@ -265,7 +268,10 @@ class ListOfDictsExpandInput(NamedTuple):
                     f"expand_kwargs() input dict keys must all be str, "
                     f"but {key!r} is of type {_describe_type(key)}"
                 )
-        return mapping, {id(v) for v in mapping.values()}
+        # filter out parse time resolved values from the resolved_oids
+        resolved_oids = {id(v) for k, v in mapping.items() if not _is_parse_time_mappable(v)}
+
+        return mapping, resolved_oids
 
 
 EXPAND_INPUT_EMPTY = DictOfListsExpandInput({})  # Sentinel value.
@@ -276,7 +282,11 @@ _EXPAND_INPUT_TYPES = {
 }
 
 
-def get_map_type_key(expand_input: ExpandInput) -> str:
+def get_map_type_key(expand_input: ExpandInput | _ExpandInputRef) -> str:
+    from airflow.serialization.serialized_objects import _ExpandInputRef
+
+    if isinstance(expand_input, _ExpandInputRef):
+        return expand_input.key
     return next(k for k, v in _EXPAND_INPUT_TYPES.items() if v == type(expand_input))
 
 

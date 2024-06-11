@@ -16,17 +16,17 @@
 # under the License.
 from __future__ import annotations
 
-from typing import Any, Iterable, TypeVar
+from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypeVar
 
+from flask import g
 from marshmallow import ValidationError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import MultipleResultsFound
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.sql import ClauseElement, Select
+from sqlalchemy.orm import joinedload
 
 from airflow.api_connexion import security
 from airflow.api_connexion.endpoints.request_dict import get_json_request_dict
-from airflow.api_connexion.exceptions import BadRequest, NotFound
+from airflow.api_connexion.exceptions import BadRequest, NotFound, PermissionDenied
 from airflow.api_connexion.parameters import format_datetime, format_parameters
 from airflow.api_connexion.schemas.task_instance_schema import (
     TaskInstanceCollection,
@@ -35,34 +35,37 @@ from airflow.api_connexion.schemas.task_instance_schema import (
     set_single_task_instance_state_form,
     set_task_instance_note_form_schema,
     set_task_instance_state_form,
+    task_dependencies_collection_schema,
     task_instance_batch_form,
     task_instance_collection_schema,
     task_instance_reference_collection_schema,
     task_instance_reference_schema,
     task_instance_schema,
 )
-from airflow.api_connexion.types import APIResponse
+from airflow.api_connexion.security import get_readable_dags
+from airflow.auth.managers.models.resource_details import DagAccessEntity, DagDetails
+from airflow.exceptions import TaskNotFound
 from airflow.models import SlaMiss
 from airflow.models.dagrun import DagRun as DR
-from airflow.models.operator import needs_expansion
 from airflow.models.taskinstance import TaskInstance as TI, clear_task_instances
-from airflow.security import permissions
 from airflow.utils.airflow_flask_app import get_airflow_app
 from airflow.utils.db import get_query_count
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import DagRunState, TaskInstanceState
+from airflow.www.decorators import action_logging
 from airflow.www.extensions.init_auth_manager import get_auth_manager
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+    from sqlalchemy.sql import ClauseElement, Select
+
+    from airflow.api_connexion.types import APIResponse
+    from airflow.auth.managers.models.batch_apis import IsAuthorizedDagRequest
 
 T = TypeVar("T")
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
 @provide_session
 def get_task_instance(
     *,
@@ -104,13 +107,7 @@ def get_task_instance(
     return task_instance_schema.dump(task_instance)
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
 @provide_session
 def get_mapped_task_instance(
     *,
@@ -156,13 +153,7 @@ def get_mapped_task_instance(
         "updated_at_lte": format_datetime,
     },
 )
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
 @provide_session
 def get_mapped_task_instances(
     *,
@@ -204,11 +195,12 @@ def get_mapped_task_instances(
         if not dag:
             error_message = f"DAG {dag_id} not found"
             raise NotFound(error_message)
-        task = dag.get_task(task_id)
-        if not task:
+        try:
+            task = dag.get_task(task_id)
+        except TaskNotFound:
             error_message = f"Task id {task_id} not found"
             raise NotFound(error_message)
-        if not needs_expansion(task):
+        if not task.get_needs_expansion():
             error_message = f"Task id {task_id} is not mapped"
             raise NotFound(error_message)
 
@@ -247,17 +239,28 @@ def get_mapped_task_instances(
         .options(joinedload(TI.rendered_task_instance_fields))
     )
 
-    if order_by:
-        if order_by == "state":
-            entry_query = entry_query.order_by(TI.state.asc(), TI.map_index.asc())
-        elif order_by == "-state":
-            entry_query = entry_query.order_by(TI.state.desc(), TI.map_index.asc())
-        elif order_by == "-map_index":
-            entry_query = entry_query.order_by(TI.map_index.desc())
-        else:
-            raise BadRequest(detail=f"Ordering with '{order_by}' is not supported")
-    else:
+    if order_by is None:
         entry_query = entry_query.order_by(TI.map_index.asc())
+    elif order_by == "state":
+        entry_query = entry_query.order_by(TI.state.asc(), TI.map_index.asc())
+    elif order_by == "-state":
+        entry_query = entry_query.order_by(TI.state.desc(), TI.map_index.asc())
+    elif order_by == "duration":
+        entry_query = entry_query.order_by(TI.duration.asc(), TI.map_index.asc())
+    elif order_by == "-duration":
+        entry_query = entry_query.order_by(TI.duration.desc(), TI.map_index.asc())
+    elif order_by == "start_date":
+        entry_query = entry_query.order_by(TI.start_date.asc(), TI.map_index.asc())
+    elif order_by == "-start_date":
+        entry_query = entry_query.order_by(TI.start_date.desc(), TI.map_index.asc())
+    elif order_by == "end_date":
+        entry_query = entry_query.order_by(TI.end_date.asc(), TI.map_index.asc())
+    elif order_by == "-end_date":
+        entry_query = entry_query.order_by(TI.end_date.desc(), TI.map_index.asc())
+    elif order_by == "-map_index":
+        entry_query = entry_query.order_by(TI.map_index.desc())
+    else:
+        raise BadRequest(detail=f"Ordering with '{order_by}' is not supported")
 
     # using execute because we want the SlaMiss entity. Scalars don't return None for missing entities
     task_instances = session.execute(entry_query.offset(offset).limit(limit)).all()
@@ -300,13 +303,7 @@ def _apply_range_filter(query: Select, key: ClauseElement, value_range: tuple[T,
         "updated_at_lte": format_datetime,
     },
 )
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
 @provide_session
 def get_task_instances(
     *,
@@ -337,6 +334,8 @@ def get_task_instances(
 
     if dag_id != "~":
         base_query = base_query.where(TI.dag_id == dag_id)
+    else:
+        base_query = base_query.where(TI.dag_id.in_(get_readable_dags()))
     if dag_run_id != "~":
         base_query = base_query.where(TI.run_id == dag_run_id)
     base_query = _apply_range_filter(
@@ -381,13 +380,7 @@ def get_task_instances(
     )
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
 @provide_session
 def get_task_instances_batch(session: Session = NEW_SESSION) -> APIResponse:
     """Get list of task instances."""
@@ -396,10 +389,24 @@ def get_task_instances_batch(session: Session = NEW_SESSION) -> APIResponse:
         data = task_instance_batch_form.load(body)
     except ValidationError as err:
         raise BadRequest(detail=str(err.messages))
+    dag_ids = data["dag_ids"]
+    if dag_ids:
+        requests: Sequence[IsAuthorizedDagRequest] = [
+            {
+                "method": "GET",
+                "details": DagDetails(id=id),
+            }
+            for id in dag_ids
+        ]
+        if not get_auth_manager().batch_is_authorized_dag(requests):
+            raise PermissionDenied(detail=f"User not allowed to access some of these DAGs: {list(dag_ids)}")
+    else:
+        dag_ids = get_airflow_app().appbuilder.sm.get_accessible_dag_ids(g.user)
+
     states = _convert_ti_states(data["state"])
     base_query = select(TI).join(TI.dag_run)
 
-    base_query = _apply_array_filter(base_query, key=TI.dag_id, values=data["dag_ids"])
+    base_query = _apply_array_filter(base_query, key=TI.dag_id, values=dag_ids)
     base_query = _apply_array_filter(base_query, key=TI.run_id, values=data["dag_run_ids"])
     base_query = _apply_array_filter(base_query, key=TI.task_id, values=data["task_ids"])
     base_query = _apply_range_filter(
@@ -434,7 +441,9 @@ def get_task_instances_batch(session: Session = NEW_SESSION) -> APIResponse:
         ),
         isouter=True,
     ).add_columns(SlaMiss)
-    ti_query = base_query.options(joinedload(TI.rendered_task_instance_fields))
+    ti_query = base_query.options(
+        joinedload(TI.rendered_task_instance_fields), joinedload(TI.task_instance_note)
+    )
     # using execute because we want the SlaMiss entity. Scalars don't return None for missing entities
     task_instances = session.execute(ti_query).all()
 
@@ -443,13 +452,8 @@ def get_task_instances_batch(session: Session = NEW_SESSION) -> APIResponse:
     )
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("PUT", DagAccessEntity.TASK_INSTANCE)
+@action_logging
 @provide_session
 def post_clear_task_instances(*, dag_id: str, session: Session = NEW_SESSION) -> APIResponse:
     """Clear task instances."""
@@ -509,13 +513,8 @@ def post_clear_task_instances(*, dag_id: str, session: Session = NEW_SESSION) ->
     )
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("PUT", DagAccessEntity.TASK_INSTANCE)
+@action_logging
 @provide_session
 def post_set_task_instances_state(*, dag_id: str, session: Session = NEW_SESSION) -> APIResponse:
     """Set a state of task instances."""
@@ -582,13 +581,8 @@ def set_mapped_task_instance_note(
     return set_task_instance_note(dag_id=dag_id, dag_run_id=dag_run_id, task_id=task_id, map_index=map_index)
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("PUT", DagAccessEntity.TASK_INSTANCE)
+@action_logging
 @provide_session
 def patch_task_instance(
     *, dag_id: str, dag_run_id: str, task_id: str, map_index: int = -1, session: Session = NEW_SESSION
@@ -628,13 +622,8 @@ def patch_task_instance(
     return task_instance_reference_schema.dump(ti)
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("PUT", DagAccessEntity.TASK_INSTANCE)
+@action_logging
 @provide_session
 def patch_mapped_task_instance(
     *, dag_id: str, dag_run_id: str, task_id: str, map_index: int, session: Session = NEW_SESSION
@@ -645,14 +634,8 @@ def patch_mapped_task_instance(
     )
 
 
-@security.requires_access(
-    [
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG_RUN),
-        (permissions.ACTION_CAN_READ, permissions.RESOURCE_DAG),
-        (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_TASK_INSTANCE),
-    ],
-)
+@security.requires_access_dag("PUT", DagAccessEntity.TASK_INSTANCE)
+@action_logging
 @provide_session
 def set_task_instance_note(
     *, dag_id: str, dag_run_id: str, task_id: str, map_index: int = -1, session: Session = NEW_SESSION
@@ -704,3 +687,65 @@ def set_task_instance_note(
         ti.task_instance_note.user_id = current_user_id
     session.commit()
     return task_instance_schema.dump((ti, sla_miss))
+
+
+@security.requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)
+@provide_session
+def get_task_instance_dependencies(
+    *, dag_id: str, dag_run_id: str, task_id: str, map_index: int = -1, session: Session = NEW_SESSION
+) -> APIResponse:
+    """Get dependencies blocking task from getting scheduled."""
+    from airflow.exceptions import TaskNotFound
+    from airflow.ti_deps.dep_context import DepContext
+    from airflow.ti_deps.dependencies_deps import SCHEDULER_QUEUED_DEPS
+    from airflow.utils.airflow_flask_app import get_airflow_app
+
+    query = select(TI).where(TI.dag_id == dag_id, TI.run_id == dag_run_id, TI.task_id == task_id)
+
+    if map_index == -1:
+        query = query.where(or_(TI.map_index == -1, TI.map_index is None))
+    else:
+        query = query.where(TI.map_index == map_index)
+
+    try:
+        result = session.execute(query).one_or_none()
+    except MultipleResultsFound:
+        raise NotFound(
+            "Task instance not found", detail="Task instance is mapped, add the map_index value to the URL"
+        )
+
+    if result is None:
+        error_message = f"Task Instance not found for dag_id={dag_id}, run_id={dag_run_id}, task_id={task_id}"
+        raise NotFound(error_message)
+
+    ti = result[0]
+    deps = []
+
+    if ti.state in [None, TaskInstanceState.SCHEDULED]:
+        dag = get_airflow_app().dag_bag.get_dag(ti.dag_id)
+
+        if dag:
+            try:
+                ti.task = dag.get_task(ti.task_id)
+            except TaskNotFound:
+                pass
+            else:
+                dep_context = DepContext(SCHEDULER_QUEUED_DEPS)
+                deps = sorted(
+                    [
+                        {"name": dep.dep_name, "reason": dep.reason}
+                        for dep in ti.get_failed_dep_statuses(dep_context=dep_context, session=session)
+                    ],
+                    key=lambda x: x["name"],
+                )
+
+    return task_dependencies_collection_schema.dump({"dependencies": deps})
+
+
+def get_mapped_task_instance_dependencies(
+    *, dag_id: str, dag_run_id: str, task_id: str, map_index: int
+) -> APIResponse:
+    """Get dependencies blocking mapped task instance from getting scheduled."""
+    return get_task_instance_dependencies(
+        dag_id=dag_id, dag_run_id=dag_run_id, task_id=task_id, map_index=map_index
+    )

@@ -20,37 +20,48 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import os
-from contextlib import suppress
+import re
+from contextlib import redirect_stdout, suppress
 from functools import wraps
+from io import StringIO
 from typing import TYPE_CHECKING, Any, Iterable
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import attrs
-from attrs import asdict
-
-# TODO: move this maybe to Airflow's logic?
+from deprecated import deprecated
 from openlineage.client.utils import RedactMixin
 
-from airflow.compat.functools import cache
-from airflow.configuration import conf
+from airflow.exceptions import AirflowProviderDeprecationWarning  # TODO: move this maybe to Airflow's logic?
+from airflow.models import DAG, BaseOperator, MappedOperator
+from airflow.providers.openlineage import conf
 from airflow.providers.openlineage.plugins.facets import (
+    AirflowJobFacet,
     AirflowMappedTaskRunFacet,
     AirflowRunFacet,
+    AirflowStateRunFacet,
+    BaseFacet,
+    UnknownOperatorAttributeRunFacet,
+    UnknownOperatorInstance,
 )
+from airflow.providers.openlineage.utils.selective_enable import (
+    is_dag_lineage_enabled,
+    is_task_lineage_enabled,
+)
+from airflow.serialization.serialized_objects import SerializedBaseOperator
 from airflow.utils.context import AirflowContextDeprecationWarning
 from airflow.utils.log.secrets_masker import Redactable, Redacted, SecretsMasker, should_hide_value_for_key
+from airflow.utils.module_loading import import_string
 
 if TYPE_CHECKING:
-    from airflow.models import DAG, BaseOperator, Connection, DagRun, TaskInstance
+    from airflow.models import DagRun, TaskInstance
 
 
 log = logging.getLogger(__name__)
 _NOMINAL_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
-def openlineage_job_name(dag_id: str, task_id: str) -> str:
-    return f"{dag_id}.{task_id}"
+def try_import_from_string(string: str) -> Any:
+    with suppress(ImportError):
+        return import_string(string)
 
 
 def get_operator_class(task: BaseOperator) -> type:
@@ -59,85 +70,7 @@ def get_operator_class(task: BaseOperator) -> type:
     return task.__class__
 
 
-def to_json_encodable(task: BaseOperator) -> dict[str, object]:
-    def _task_encoder(obj):
-        from airflow.models import DAG
-
-        if isinstance(obj, datetime.datetime):
-            return obj.isoformat()
-        elif isinstance(obj, DAG):
-            return {
-                "dag_id": obj.dag_id,
-                "tags": obj.tags,
-                "schedule_interval": obj.schedule_interval,
-                "timetable": obj.timetable.serialize(),
-            }
-        else:
-            return str(obj)
-
-    return json.loads(json.dumps(task.__dict__, default=_task_encoder))
-
-
-def url_to_https(url) -> str | None:
-    # Ensure URL exists
-    if not url:
-        return None
-
-    base_url = None
-    if url.startswith("git@"):
-        part = url.split("git@")[1:2]
-        if part:
-            base_url = f'https://{part[0].replace(":", "/", 1)}'
-    elif url.startswith("https://"):
-        base_url = url
-
-    if not base_url:
-        raise ValueError(f"Unable to extract location from: {url}")
-
-    if base_url.endswith(".git"):
-        base_url = base_url[:-4]
-    return base_url
-
-
-def redacted_connection_uri(conn: Connection, filtered_params=None, filtered_prefixes=None):
-    """
-    Return the connection URI for the given Connection.
-
-    This method additionally filters URI by removing query parameters that are known to carry sensitive data
-    like username, password, access key.
-    """
-    if filtered_prefixes is None:
-        filtered_prefixes = []
-    if filtered_params is None:
-        filtered_params = []
-
-    def filter_key_params(k: str):
-        return k not in filtered_params and any(substr in k for substr in filtered_prefixes)
-
-    conn_uri = conn.get_uri()
-    parsed = urlparse(conn_uri)
-
-    # Remove username and password
-    netloc = f"{parsed.hostname}" + (f":{parsed.port}" if parsed.port else "")
-    parsed = parsed._replace(netloc=netloc)
-    if parsed.query:
-        query_dict = dict(parse_qsl(parsed.query))
-        if conn.EXTRA_KEY in query_dict:
-            query_dict = json.loads(query_dict[conn.EXTRA_KEY])
-        filtered_qs = {k: v for k, v in query_dict.items() if not filter_key_params(k)}
-        parsed = parsed._replace(query=urlencode(filtered_qs))
-    return urlunparse(parsed)
-
-
-def get_connection(conn_id) -> Connection | None:
-    from airflow.hooks.base import BaseHook
-
-    with suppress(Exception):
-        return BaseHook.get_connection(conn_id=conn_id)
-    return None
-
-
-def get_job_name(task):
+def get_job_name(task: TaskInstance) -> str:
     return f"{task.dag_id}.{task.task_id}"
 
 
@@ -148,6 +81,30 @@ def get_custom_facets(task_instance: TaskInstance | None = None) -> dict[str, An
     if hasattr(task_instance, "map_index") and getattr(task_instance, "map_index") != -1:
         custom_facets["airflow_mappedTask"] = AirflowMappedTaskRunFacet.from_task_instance(task_instance)
     return custom_facets
+
+
+def get_fully_qualified_class_name(operator: BaseOperator | MappedOperator) -> str:
+    if isinstance(operator, (MappedOperator, SerializedBaseOperator)):
+        # as in airflow.api_connexion.schemas.common_schema.ClassReferenceSchema
+        return operator._task_module + "." + operator._task_type  # type: ignore
+    op_class = get_operator_class(operator)
+    return op_class.__module__ + "." + op_class.__name__
+
+
+def is_operator_disabled(operator: BaseOperator | MappedOperator) -> bool:
+    return get_fully_qualified_class_name(operator) in conf.disabled_operators()
+
+
+def is_selective_lineage_enabled(obj: DAG | BaseOperator | MappedOperator) -> bool:
+    """If selective enable is active check if DAG or Task is enabled to emit events."""
+    if not conf.selective_enable():
+        return True
+    if isinstance(obj, DAG):
+        return is_dag_lineage_enabled(obj)
+    elif isinstance(obj, (BaseOperator, MappedOperator)):
+        return is_task_lineage_enabled(obj)
+    else:
+        raise TypeError("is_selective_lineage_enabled can only be used on DAG or Operator objects")
 
 
 class InfoJsonEncodable(dict):
@@ -188,6 +145,8 @@ class InfoJsonEncodable(dict):
     def _cast_basic_types(value):
         if isinstance(value, datetime.datetime):
             return value.isoformat()
+        if isinstance(value, datetime.timedelta):
+            return f"{value.total_seconds()} seconds"
         if isinstance(value, (set, list, tuple)):
             return str(list(value))
         return value
@@ -205,25 +164,23 @@ class InfoJsonEncodable(dict):
 
     def _include_fields(self):
         if self.includes and self.excludes:
-            raise Exception("Don't use both includes and excludes.")
+            raise ValueError("Don't use both includes and excludes.")
         if self.includes:
             for field in self.includes:
-                if field in self._fields or not hasattr(self.obj, field):
-                    continue
-                setattr(self, field, getattr(self.obj, field))
-                self._fields.append(field)
+                if field not in self._fields and hasattr(self.obj, field):
+                    setattr(self, field, getattr(self.obj, field))
+                    self._fields.append(field)
         else:
             for field, val in self.obj.__dict__.items():
-                if field in self._fields or field in self.excludes or field in self.renames:
-                    continue
-                setattr(self, field, val)
-                self._fields.append(field)
+                if field not in self._fields and field not in self.excludes and field not in self.renames:
+                    setattr(self, field, val)
+                    self._fields.append(field)
 
 
 class DagInfo(InfoJsonEncodable):
     """Defines encoding DAG object to JSON."""
 
-    includes = ["dag_id", "schedule_interval", "tags", "start_date"]
+    includes = ["dag_id", "description", "owner", "schedule_interval", "start_date", "tags"]
     casts = {"timetable": lambda dag: dag.timetable.serialize() if getattr(dag, "timetable", None) else None}
     renames = {"_dag_id": "dag_id"}
 
@@ -246,11 +203,11 @@ class DagRunInfo(InfoJsonEncodable):
 class TaskInstanceInfo(InfoJsonEncodable):
     """Defines encoding TaskInstance object to JSON."""
 
-    includes = ["duration", "try_number", "pool"]
+    includes = ["duration", "try_number", "pool", "queued_dttm"]
     casts = {
-        "map_index": lambda ti: ti.map_index
-        if hasattr(ti, "map_index") and getattr(ti, "map_index") != -1
-        else None
+        "map_index": lambda ti: (
+            ti.map_index if hasattr(ti, "map_index") and getattr(ti, "map_index") != -1 else None
+        )
     }
 
 
@@ -258,29 +215,43 @@ class TaskInfo(InfoJsonEncodable):
     """Defines encoding BaseOperator/AbstractOperator object to JSON."""
 
     renames = {
-        "_BaseOperator__init_kwargs": "args",
         "_BaseOperator__from_mapped": "mapped",
         "_downstream_task_ids": "downstream_task_ids",
         "_upstream_task_ids": "upstream_task_ids",
+        "_is_setup": "is_setup",
+        "_is_teardown": "is_teardown",
     }
-    excludes = [
-        "_BaseOperator__instantiated",
-        "_dag",
-        "_hook",
-        "_log",
-        "_outlets",
-        "_inlets",
-        "_lock_for_execution",
-        "handler",
-        "params",
-        "python_callable",
-        "retry_delay",
+    includes = [
+        "depends_on_past",
+        "downstream_task_ids",
+        "execution_timeout",
+        "executor_config",
+        "ignore_first_depends_on_past",
+        "max_active_tis_per_dag",
+        "max_active_tis_per_dagrun",
+        "max_retry_delay",
+        "multiple_outputs",
+        "owner",
+        "priority_weight",
+        "queue",
+        "retries",
+        "retry_exponential_backoff",
+        "run_as_user",
+        "sla",
+        "task_id",
+        "trigger_rule",
+        "upstream_task_ids",
+        "wait_for_downstream",
+        "wait_for_past_depends_before_skipping",
+        "weight_rule",
     ]
     casts = {
         "operator_class": lambda task: task.task_type,
-        "task_group": lambda task: TaskGroupInfo(task.task_group)
-        if hasattr(task, "task_group") and getattr(task.task_group, "_group_id", None)
-        else None,
+        "task_group": lambda task: (
+            TaskGroupInfo(task.task_group)
+            if hasattr(task, "task_group") and getattr(task.task_group, "_group_id", None)
+            else None
+        ),
     }
 
 
@@ -306,20 +277,170 @@ def get_airflow_run_facet(
     task_instance: TaskInstance,
     task: BaseOperator,
     task_uuid: str,
-):
+) -> dict[str, BaseFacet]:
     return {
-        "airflow": json.loads(
-            json.dumps(
-                asdict(
-                    AirflowRunFacet(
-                        dag=DagInfo(dag),
-                        dagRun=DagRunInfo(dag_run),
-                        taskInstance=TaskInstanceInfo(task_instance),
-                        task=TaskInfo(task),
-                        taskUuid=task_uuid,
+        "airflow": AirflowRunFacet(
+            dag=DagInfo(dag),
+            dagRun=DagRunInfo(dag_run),
+            taskInstance=TaskInstanceInfo(task_instance),
+            task=TaskInfo(task),
+            taskUuid=task_uuid,
+        )
+    }
+
+
+def get_airflow_job_facet(dag_run: DagRun) -> dict[str, BaseFacet]:
+    if not dag_run.dag:
+        return {}
+    return {
+        "airflow": AirflowJobFacet(
+            taskTree=_get_parsed_dag_tree(dag_run.dag),
+            taskGroups=_get_task_groups_details(dag_run.dag),
+            tasks=_get_tasks_details(dag_run.dag),
+        )
+    }
+
+
+def get_airflow_state_run_facet(dag_run: DagRun) -> dict[str, BaseFacet]:
+    return {
+        "airflowState": AirflowStateRunFacet(
+            dagRunState=dag_run.get_state(),
+            tasksState={ti.task_id: ti.state for ti in dag_run.get_task_instances()},
+        )
+    }
+
+
+def _safe_get_dag_tree_view(dag: DAG) -> list[str]:
+    # get_tree_view() has been added in Airflow 2.8.2
+    if hasattr(dag, "get_tree_view"):
+        return dag.get_tree_view().splitlines()
+
+    with redirect_stdout(StringIO()) as stdout:
+        dag.tree_view()
+        return stdout.getvalue().splitlines()
+
+
+def _get_parsed_dag_tree(dag: DAG) -> dict:
+    """
+    Get DAG's tasks hierarchy representation.
+
+    While the task dependencies are defined as following:
+    task >> [task_2, task_4] >> task_7
+    task_3 >> task_5
+    task_6  # has no dependencies, it's a root and a leaf
+
+    The result of this function will look like:
+    {
+        "task": {
+            "task_2": {
+                "task_7": {}
+            },
+            "task_4": {
+                "task_7": {}
+            }
+        },
+        "task_3": {
+            "task_5": {}
+        },
+        "task_6": {}
+    }
+    """
+    lines = _safe_get_dag_tree_view(dag)
+    task_dict: dict[str, dict] = {}
+    parent_map: dict[int, tuple[str, dict]] = {}
+
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+
+        # Determine the level by counting the leading spaces, assuming 4 spaces per level
+        # as defined in airflow.models.dag.DAG._generate_tree_view()
+        level = (len(line) - len(stripped_line)) // 4
+        # airflow.models.baseoperator.BaseOperator.__repr__ is used in DAG tree
+        # <Task({op_class}): {task_id}>
+        match = re.match(r"^<Task\((.+)\): (.*?)>$", stripped_line)
+        if not match:
+            return {}
+        current_task_id = match[2]
+
+        if level == 0:  # It's a root task
+            task_dict[current_task_id] = {}
+            parent_map[level] = (current_task_id, task_dict[current_task_id])
+        else:
+            # Find the immediate parent task
+            parent_task, parent_dict = parent_map[(level - 1)]
+            # Create new dict for the current task
+            parent_dict[current_task_id] = {}
+            # Update this task in the parent map
+            parent_map[level] = (current_task_id, parent_dict[current_task_id])
+
+    return task_dict
+
+
+def _get_tasks_details(dag: DAG) -> dict:
+    tasks = {
+        single_task.task_id: {
+            "operator": get_fully_qualified_class_name(single_task),
+            "task_group": single_task.task_group.group_id if single_task.task_group else None,
+            "emits_ol_events": _emits_ol_events(single_task),
+            "ui_color": single_task.ui_color,
+            "ui_fgcolor": single_task.ui_fgcolor,
+            "ui_label": single_task.label,
+            "is_setup": single_task.is_setup,
+            "is_teardown": single_task.is_teardown,
+        }
+        for single_task in dag.tasks
+    }
+
+    return tasks
+
+
+def _get_task_groups_details(dag: DAG) -> dict:
+    return {
+        tg_id: {
+            "parent_group": tg.parent_group.group_id,
+            "tooltip": tg.tooltip,
+            "ui_color": tg.ui_color,
+            "ui_fgcolor": tg.ui_fgcolor,
+            "ui_label": tg.label,
+        }
+        for tg_id, tg in dag.task_group_dict.items()
+    }
+
+
+def _emits_ol_events(task: BaseOperator | MappedOperator) -> bool:
+    config_selective_enabled = is_selective_lineage_enabled(task)
+    config_disabled_for_operators = is_operator_disabled(task)
+    # empty operators without callbacks/outlets are skipped for optimization by Airflow
+    # in airflow.models.taskinstance.TaskInstance._schedule_downstream_tasks
+    is_skipped_as_empty_operator = all(
+        (
+            task.inherits_from_empty_operator,
+            not task.on_execute_callback,
+            not task.on_success_callback,
+            not task.outlets,
+        )
+    )
+
+    emits_ol_events = all(
+        (config_selective_enabled, not config_disabled_for_operators, not is_skipped_as_empty_operator)
+    )
+    return emits_ol_events
+
+
+def get_unknown_source_attribute_run_facet(task: BaseOperator, name: str | None = None):
+    if not name:
+        name = get_operator_class(task).__name__
+    return {
+        "unknownSourceAttribute": attrs.asdict(
+            UnknownOperatorAttributeRunFacet(
+                unknownItems=[
+                    UnknownOperatorInstance(
+                        name=name,
+                        properties=TaskInfo(task),
                     )
-                ),
-                default=str,
+                ]
             )
         )
     }
@@ -356,9 +477,10 @@ class OpenLineageRedactor(SecretsMasker):
                 if name and should_hide_value_for_key(name):
                     return self._redact_all(item, depth, max_depth)
                 if attrs.has(type(item)):
-                    # TODO: fixme when mypy gets compatible with new attrs
+                    # TODO: FIXME when mypy gets compatible with new attrs
                     for dict_key, subval in attrs.asdict(
-                        item, recurse=False  # type: ignore[arg-type]
+                        item,  # type: ignore[arg-type]
+                        recurse=False,
                     ).items():
                         if _is_name_redactable(dict_key, item):
                             setattr(
@@ -380,13 +502,8 @@ class OpenLineageRedactor(SecretsMasker):
                     return item
                 else:
                     return super()._redact(item, name, depth, max_depth)
-        except Exception as e:
-            log.warning(
-                "Unable to redact %s. Error was: %s: %s",
-                repr(item),
-                type(e).__name__,
-                str(e),
-            )
+        except Exception as exc:
+            log.warning("Unable to redact %r. Error was: %s: %s", item, type(exc).__name__, exc)
         return item
 
 
@@ -404,23 +521,21 @@ def _is_name_redactable(name, redacted):
     return name not in redacted.skip_redact
 
 
-def print_exception(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        try:
-            return f(*args, **kwargs)
-        except Exception as e:
-            log.exception(e)
+def print_warning(log):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except Exception as e:
+                log.warning(
+                    "Note: exception below is being caught: it's printed for visibility. However OpenLineage events aren't being emitted. If you see that, task has completed successfully despite not getting OL events."
+                )
+                log.warning(e)
 
-    return wrapper
+        return wrapper
 
-
-@cache
-def is_source_enabled() -> bool:
-    source_var = conf.get(
-        "openlineage", "disable_source_code", fallback=os.getenv("OPENLINEAGE_AIRFLOW_DISABLE_SOURCE_CODE")
-    )
-    return isinstance(source_var, str) and source_var.lower() not in ("true", "1", "t")
+    return decorator
 
 
 def get_filtered_unknown_operator_keys(operator: BaseOperator) -> dict:
@@ -428,8 +543,20 @@ def get_filtered_unknown_operator_keys(operator: BaseOperator) -> dict:
     return {attr: value for attr, value in operator.__dict__.items() if attr not in not_required_keys}
 
 
+@deprecated(
+    reason=(
+        "`airflow.providers.openlineage.utils.utils.normalize_sql` "
+        "has been deprecated and will be removed in future"
+    ),
+    category=AirflowProviderDeprecationWarning,
+)
 def normalize_sql(sql: str | Iterable[str]):
     if isinstance(sql, str):
         sql = [stmt for stmt in sql.split(";") if stmt != ""]
     sql = [obj for stmt in sql for obj in stmt.split(";") if obj != ""]
     return ";\n".join(sql)
+
+
+def should_use_external_connection(hook) -> bool:
+    # TODO: Add checking overrides
+    return hook.__class__.__name__ not in ["SnowflakeHook", "SnowflakeSqlApiHook"]

@@ -18,13 +18,15 @@
 from __future__ import annotations
 
 import warnings
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from airflow.exceptions import RemovedInAirflow3Warning
 from airflow.operators.branch import BaseBranchOperator
 from airflow.utils import timezone
-from airflow.utils.context import Context
 from airflow.utils.weekday import WeekDay
+
+if TYPE_CHECKING:
+    from airflow.utils.context import Context
 
 
 class BranchDayOfWeekOperator(BaseBranchOperator):
@@ -42,7 +44,7 @@ class BranchDayOfWeekOperator(BaseBranchOperator):
         monday = EmptyOperator(task_id="monday")
         other_day = EmptyOperator(task_id="other_day")
 
-        monday_check = DayOfWeekSensor(
+        monday_check = BranchDayOfWeekOperator(
             task_id="monday_check",
             week_day="Monday",
             use_task_logical_date=True,
@@ -71,8 +73,10 @@ class BranchDayOfWeekOperator(BaseBranchOperator):
         # add downstream dependencies as you would do with any branch operator
         weekend_check >> [workday, weekend]
 
-    :param follow_task_ids_if_true: task id or task ids to follow if criteria met
-    :param follow_task_ids_if_false: task id or task ids to follow if criteria does not met
+    :param follow_task_ids_if_true: task_id, task_group_id, or a list of task_ids and/or task_group_ids
+        to follow if criteria met.
+    :param follow_task_ids_if_false: task_id, task_group_id, or a list of task_ids and/or task_group_ids
+        to follow if criteria not met.
     :param week_day: Day of the week to check (full name). Optionally, a set
         of days can also be provided using a set. Example values:
 

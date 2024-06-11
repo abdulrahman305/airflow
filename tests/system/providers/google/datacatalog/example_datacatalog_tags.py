@@ -23,7 +23,7 @@ from typing import cast
 
 from google.cloud.datacatalog import TagField, TagTemplateField
 
-from airflow import models
+from airflow.models.dag import DAG
 from airflow.models.xcom_arg import XComArg
 from airflow.operators.bash import BashOperator
 from airflow.providers.google.cloud.operators.datacatalog import (
@@ -40,9 +40,10 @@ from airflow.providers.google.cloud.operators.datacatalog import (
 )
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.utils.trigger_rule import TriggerRule
+from tests.system.providers.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT")
+PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "datacatalog_tags"
 
@@ -56,7 +57,7 @@ TEMPLATE_ID = f"template_id_tags_{ENV_ID}"
 TAG_TEMPLATE_DISPLAY_NAME = f"Data Catalog {DAG_ID} {ENV_ID}"
 FIELD_NAME_1 = "first"
 
-with models.DAG(
+with DAG(
     DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),

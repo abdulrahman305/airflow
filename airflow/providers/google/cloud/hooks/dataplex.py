@@ -15,16 +15,15 @@
 # specific language governing permissions and limitations
 # under the License.
 """This module contains Google Dataplex hook."""
+
 from __future__ import annotations
 
 import time
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from google.api_core.client_options import ClientOptions
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
-from google.api_core.operation import Operation
-from google.api_core.retry import Retry
-from google.cloud.dataplex_v1 import DataplexServiceClient, DataScanServiceClient
+from google.cloud.dataplex_v1 import DataplexServiceClient, DataScanServiceAsyncClient, DataScanServiceClient
 from google.cloud.dataplex_v1.types import (
     Asset,
     DataScan,
@@ -34,11 +33,20 @@ from google.cloud.dataplex_v1.types import (
     Zone,
 )
 from google.protobuf.field_mask_pb2 import FieldMask
-from googleapiclient.discovery import Resource
 
 from airflow.exceptions import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
-from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
+from airflow.providers.google.common.hooks.base_google import (
+    PROVIDE_PROJECT_ID,
+    GoogleBaseAsyncHook,
+    GoogleBaseHook,
+)
+
+if TYPE_CHECKING:
+    from google.api_core.operation import Operation
+    from google.api_core.retry import Retry
+    from google.api_core.retry_async import AsyncRetry
+    from googleapiclient.discovery import Resource
 
 PATH_DATA_SCAN = "projects/{project_id}/locations/{region}/dataScans/{data_scan_id}"
 
@@ -90,7 +98,7 @@ class DataplexHook(GoogleBaseHook):
         self.location = location
 
     def get_dataplex_client(self) -> DataplexServiceClient:
-        """Returns DataplexServiceClient."""
+        """Return DataplexServiceClient."""
         client_options = ClientOptions(api_endpoint="dataplex.googleapis.com:443")
 
         return DataplexServiceClient(
@@ -98,7 +106,7 @@ class DataplexHook(GoogleBaseHook):
         )
 
     def get_dataplex_data_scan_client(self) -> DataScanServiceClient:
-        """Returns DataScanServiceClient."""
+        """Return DataScanServiceClient."""
         client_options = ClientOptions(api_endpoint="dataplex.googleapis.com:443")
 
         return DataScanServiceClient(
@@ -106,7 +114,7 @@ class DataplexHook(GoogleBaseHook):
         )
 
     def wait_for_operation(self, timeout: float | None, operation: Operation):
-        """Waits for long-lasting operation to complete."""
+        """Wait for long-lasting operation to complete."""
         try:
             return operation.result(timeout=timeout)
         except Exception:
@@ -127,7 +135,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Creates a task resource within a lake.
+        Create a task resource within a lake.
 
         :param project_id: Required. The ID of the Google Cloud project that the task belongs to.
         :param region: Required. The ID of the Google Cloud region that the task belongs to.
@@ -209,7 +217,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Lists tasks under the given lake.
+        List tasks under the given lake.
 
         :param project_id: Required. The ID of the Google Cloud project that the task belongs to.
         :param region: Required. The ID of the Google Cloud region that the task belongs to.
@@ -329,7 +337,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Creates a lake resource.
+        Create a lake resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -404,7 +412,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Creates a zone resource within a lake.
+        Create a zone resource within a lake.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -444,7 +452,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Deletes a zone resource. All assets within a zone must be deleted before the zone can be deleted.
+        Delete a zone resource. All assets within a zone must be deleted before the zone can be deleted.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -481,7 +489,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Creates an asset resource.
+        Create an asset resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -523,7 +531,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Deletes an asset resource.
+        Delete an asset resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -559,7 +567,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Creates a DataScan resource.
+        Create a DataScan resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -597,7 +605,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Runs an on-demand execution of a DataScan.
+        Run an on-demand execution of a DataScan.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -633,7 +641,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Gets a DataScan Job resource.
+        Get a DataScan Job resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -661,7 +669,7 @@ class DataplexHook(GoogleBaseHook):
         self,
         data_scan_id: str,
         job_id: str | None = None,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         region: str | None = None,
         wait_time: int = 10,
         result_timeout: float | None = None,
@@ -712,7 +720,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Gets a DataScan resource.
+        Get a DataScan resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -747,7 +755,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Updates a DataScan resource.
+        Update a DataScan resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -799,7 +807,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Deletes a DataScan resource.
+        Delete a DataScan resource.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -834,7 +842,7 @@ class DataplexHook(GoogleBaseHook):
         metadata: Sequence[tuple[str, str]] = (),
     ) -> Any:
         """
-        Lists DataScanJobs under the given DataScan.
+        List DataScanJobs under the given DataScan.
 
         :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
         :param region: Required. The ID of the Google Cloud region that the lake belongs to.
@@ -856,4 +864,70 @@ class DataplexHook(GoogleBaseHook):
             timeout=timeout,
             metadata=metadata,
         )
+        return result
+
+
+class DataplexAsyncHook(GoogleBaseAsyncHook):
+    """
+    Asynchronous Hook for Google Cloud Dataplex APIs.
+
+    All the methods in the hook where project_id is used must be called with
+    keyword arguments rather than positional.
+    """
+
+    sync_hook_class = DataplexHook
+
+    def __init__(
+        self,
+        gcp_conn_id: str = "google_cloud_default",
+        impersonation_chain: str | Sequence[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(gcp_conn_id=gcp_conn_id, impersonation_chain=impersonation_chain)
+
+    async def get_dataplex_data_scan_client(self) -> DataScanServiceAsyncClient:
+        """Return DataScanServiceAsyncClient."""
+        client_options = ClientOptions(api_endpoint="dataplex.googleapis.com:443")
+
+        return DataScanServiceAsyncClient(
+            credentials=(await self.get_sync_hook()).get_credentials(),
+            client_info=CLIENT_INFO,
+            client_options=client_options,
+        )
+
+    @GoogleBaseHook.fallback_to_default_project_id
+    async def get_data_scan_job(
+        self,
+        project_id: str,
+        region: str,
+        data_scan_id: str | None = None,
+        job_id: str | None = None,
+        retry: AsyncRetry | _MethodDefault = DEFAULT,
+        timeout: float | None = None,
+        metadata: Sequence[tuple[str, str]] = (),
+    ) -> Any:
+        """
+        Get a DataScan Job resource.
+
+        :param project_id: Required. The ID of the Google Cloud project that the lake belongs to.
+        :param region: Required. The ID of the Google Cloud region that the lake belongs to.
+        :param data_scan_id: Required. DataScan identifier.
+        :param job_id: Required. The resource name of the DataScanJob:
+            projects/{project_id}/locations/{region}/dataScans/{data_scan_id}/jobs/{data_scan_job_id}
+        :param retry: A retry object used  to retry requests. If `None` is specified, requests
+            will not be retried.
+        :param timeout: The amount of time, in seconds, to wait for the request to complete.
+            Note that if `retry` is specified, the timeout applies to each individual attempt.
+        :param metadata: Additional metadata that is provided to the method.
+        """
+        client = await self.get_dataplex_data_scan_client()
+
+        name = f"projects/{project_id}/locations/{region}/dataScans/{data_scan_id}/jobs/{job_id}"
+        result = await client.get_data_scan_job(
+            request={"name": name, "view": "FULL"},
+            retry=retry,
+            timeout=timeout,
+            metadata=metadata,
+        )
+
         return result

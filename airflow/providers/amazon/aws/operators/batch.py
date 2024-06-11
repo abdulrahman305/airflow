@@ -22,6 +22,7 @@
     - https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/batch.html
     - https://docs.aws.amazon.com/batch/latest/APIReference/Welcome.html
 """
+
 from __future__ import annotations
 
 import warnings
@@ -32,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 from airflow.configuration import conf
 from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
 from airflow.models import BaseOperator
+from airflow.models.mappedoperator import MappedOperator
 from airflow.providers.amazon.aws.hooks.batch_client import BatchClientHook
 from airflow.providers.amazon.aws.links.batch import (
     BatchJobDefinitionLink,
@@ -43,8 +45,9 @@ from airflow.providers.amazon.aws.triggers.batch import (
     BatchCreateComputeEnvironmentTrigger,
     BatchJobTrigger,
 )
-from airflow.providers.amazon.aws.utils import trim_none_values
+from airflow.providers.amazon.aws.utils import trim_none_values, validate_execute_complete_event
 from airflow.providers.amazon.aws.utils.task_log_fetcher import AwsTaskLogFetcher
+from airflow.utils.types import NOTSET
 
 if TYPE_CHECKING:
     from airflow.utils.context import Context
@@ -62,6 +65,7 @@ class BatchOperator(BaseOperator):
     :param job_queue: the queue name on AWS Batch
     :param overrides: DEPRECATED, use container_overrides instead with the same value.
     :param container_overrides: the `containerOverrides` parameter for boto3 (templated)
+    :param ecs_properties_override: the `ecsPropertiesOverride` parameter for boto3 (templated)
     :param node_overrides: the `nodeOverrides` parameter for boto3 (templated)
     :param share_identifier: The share identifier for the job. Don't specify this parameter if the job queue
         doesn't have a scheduling policy.
@@ -109,8 +113,10 @@ class BatchOperator(BaseOperator):
         "job_queue",
         "container_overrides",
         "array_properties",
+        "ecs_properties_override",
         "node_overrides",
         "parameters",
+        "retry_strategy",
         "waiters",
         "tags",
         "wait_for_completion",
@@ -120,15 +126,29 @@ class BatchOperator(BaseOperator):
     template_fields_renderers = {
         "container_overrides": "json",
         "parameters": "json",
+        "ecs_properties_override": "json",
         "node_overrides": "json",
+        "retry_strategy": "json",
     }
 
     @property
     def operator_extra_links(self):
         op_extra_links = [BatchJobDetailsLink()]
-        if self.wait_for_completion:
+
+        if isinstance(self, MappedOperator):
+            wait_for_completion = self.partial_kwargs.get(
+                "wait_for_completion"
+            ) or self.expand_input.value.get("wait_for_completion")
+            array_properties = self.partial_kwargs.get("array_properties") or self.expand_input.value.get(
+                "array_properties"
+            )
+        else:
+            wait_for_completion = self.wait_for_completion
+            array_properties = self.array_properties
+
+        if wait_for_completion:
             op_extra_links.extend([BatchJobDefinitionLink(), BatchJobQueueLink()])
-        if not self.array_properties:
+        if not array_properties:
             # There is no CloudWatch Link to the parent Batch Job available.
             op_extra_links.append(CloudWatchEventsLink())
 
@@ -143,10 +163,12 @@ class BatchOperator(BaseOperator):
         overrides: dict | None = None,  # deprecated
         container_overrides: dict | None = None,
         array_properties: dict | None = None,
+        ecs_properties_override: dict | None = None,
         node_overrides: dict | None = None,
         share_identifier: str | None = None,
         scheduling_priority_override: int | None = None,
         parameters: dict | None = None,
+        retry_strategy: dict | None = None,
         job_id: str | None = None,
         waiters: Any | None = None,
         max_retries: int = 4200,
@@ -183,11 +205,13 @@ class BatchOperator(BaseOperator):
                 stacklevel=2,
             )
 
+        self.ecs_properties_override = ecs_properties_override
         self.node_overrides = node_overrides
         self.share_identifier = share_identifier
         self.scheduling_priority_override = scheduling_priority_override
         self.array_properties = array_properties
         self.parameters = parameters or {}
+        self.retry_strategy = retry_strategy
         self.waiters = waiters
         self.tags = tags or {}
         self.wait_for_completion = wait_for_completion
@@ -211,7 +235,7 @@ class BatchOperator(BaseOperator):
             region_name=self.region_name,
         )
 
-    def execute(self, context: Context):
+    def execute(self, context: Context) -> str | None:
         """Submit and monitor an AWS Batch job.
 
         :raises: AirflowException
@@ -219,28 +243,43 @@ class BatchOperator(BaseOperator):
         self.submit_job(context)
 
         if self.deferrable:
-            self.defer(
-                timeout=self.execution_timeout,
-                trigger=BatchJobTrigger(
-                    job_id=self.job_id,
-                    waiter_max_attempts=self.max_retries,
-                    aws_conn_id=self.aws_conn_id,
-                    region_name=self.region_name,
-                    waiter_delay=self.poll_interval,
-                ),
-                method_name="execute_complete",
-            )
+            if not self.job_id:
+                raise AirflowException("AWS Batch job - job_id was not found")
+
+            job = self.hook.get_job_description(self.job_id)
+            job_status = job.get("status")
+            if job_status == self.hook.SUCCESS_STATE:
+                self.log.info("Job completed.")
+                return self.job_id
+            elif job_status == self.hook.FAILURE_STATE:
+                raise AirflowException(f"Error while running job: {self.job_id} is in {job_status} state")
+            elif job_status in self.hook.INTERMEDIATE_STATES:
+                self.defer(
+                    timeout=self.execution_timeout,
+                    trigger=BatchJobTrigger(
+                        job_id=self.job_id,
+                        waiter_max_attempts=self.max_retries,
+                        aws_conn_id=self.aws_conn_id,
+                        region_name=self.region_name,
+                        waiter_delay=self.poll_interval,
+                    ),
+                    method_name="execute_complete",
+                )
+
+            raise AirflowException(f"Unexpected status: {job_status}")
 
         if self.wait_for_completion:
             self.monitor_job(context)
 
         return self.job_id
 
-    def execute_complete(self, context, event=None):
+    def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> str:
+        event = validate_execute_complete_event(event)
+
         if event["status"] != "success":
             raise AirflowException(f"Error while running job: {event}")
-        else:
-            self.log.info("Job completed.")
+
+        self.log.info("Job completed.")
         return event["job_id"]
 
     def on_kill(self):
@@ -262,6 +301,8 @@ class BatchOperator(BaseOperator):
             self.log.info("AWS Batch job - container overrides: %s", self.container_overrides)
         if self.array_properties:
             self.log.info("AWS Batch job - array properties: %s", self.array_properties)
+        if self.ecs_properties_override:
+            self.log.info("AWS Batch job - ECS properties: %s", self.ecs_properties_override)
         if self.node_overrides:
             self.log.info("AWS Batch job - node properties: %s", self.node_overrides)
 
@@ -273,7 +314,9 @@ class BatchOperator(BaseOperator):
             "parameters": self.parameters,
             "tags": self.tags,
             "containerOverrides": self.container_overrides,
+            "ecsPropertiesOverride": self.ecs_properties_override,
             "nodeOverrides": self.node_overrides,
+            "retryStrategy": self.retry_strategy,
             "shareIdentifier": self.share_identifier,
             "schedulingPriorityOverride": self.scheduling_priority_override,
         }
@@ -346,7 +389,12 @@ class BatchOperator(BaseOperator):
             else:
                 self.hook.wait_for_job(self.job_id)
 
-        awslogs = self.hook.get_job_all_awslogs_info(self.job_id)
+        awslogs = []
+        try:
+            awslogs = self.hook.get_job_all_awslogs_info(self.job_id)
+        except AirflowException as ae:
+            self.log.warning("Cannot determine where to find the AWS logs for this Batch job: %s", ae)
+
         if awslogs:
             self.log.info("AWS Batch job (%s) CloudWatch Events details found. Links to logs:", self.job_id)
             link_builder = CloudWatchEventsLink()
@@ -439,16 +487,16 @@ class BatchCreateComputeEnvironmentOperator(BaseOperator):
         aws_conn_id: str | None = None,
         region_name: str | None = None,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        status_retries=NOTSET,
         **kwargs,
     ):
-        if "status_retries" in kwargs:
+        if status_retries is not NOTSET:
             warnings.warn(
                 "The `status_retries` parameter is unused and should be removed. "
                 "It'll be deleted in a future version.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=2,
             )
-            kwargs.pop("status_retries")  # remove before calling super() to prevent unexpected arg error
 
         super().__init__(**kwargs)
 
@@ -498,7 +546,9 @@ class BatchCreateComputeEnvironmentOperator(BaseOperator):
         self.log.info("AWS Batch compute environment created successfully")
         return arn
 
-    def execute_complete(self, context, event=None):
+    def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> str:
+        event = validate_execute_complete_event(event)
+
         if event["status"] != "success":
             raise AirflowException(f"Error while waiting for the compute environment to be ready: {event}")
         return event["value"]

@@ -22,12 +22,12 @@ This module contains Google PubSub operators.
 
     MessageStoragePolicy
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
-from google.api_core.retry import Retry
 from google.cloud.pubsub_v1.types import (
     DeadLetterPolicy,
     Duration,
@@ -36,13 +36,17 @@ from google.cloud.pubsub_v1.types import (
     PushConfig,
     ReceivedMessage,
     RetryPolicy,
+    SchemaSettings,
 )
 
 from airflow.providers.google.cloud.hooks.pubsub import PubSubHook
 from airflow.providers.google.cloud.links.pubsub import PubSubSubscriptionLink, PubSubTopicLink
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
+from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 
 if TYPE_CHECKING:
+    from google.api_core.retry import Retry
+
     from airflow.utils.context import Context
 
 
@@ -56,23 +60,21 @@ class PubSubCreateTopicOperator(GoogleCloudBaseOperator):
     By default, if the topic already exists, this operator will
     not cause the DAG to fail. ::
 
-        with DAG('successful DAG') as dag:
-            (
-                PubSubCreateTopicOperator(project_id='my-project', topic='my_new_topic')
-                >> PubSubCreateTopicOperator(project_id='my-project', topic='my_new_topic')
-            )
+        with DAG("successful DAG") as dag:
+            create_topic = PubSubCreateTopicOperator(project_id="my-project", topic="my_new_topic")
+            create_topic_again = PubSubCreateTopicOperator(project_id="my-project", topic="my_new_topic")
+
+            create_topic >> create_topic_again
 
     The operator can be configured to fail if the topic already exists. ::
 
-        with DAG('failing DAG') as dag:
-            (
-                PubSubCreateTopicOperator(project_id='my-project', topic='my_new_topic')
-                >> PubSubCreateTopicOperator(
-                    project_id='my-project',
-                    topic='my_new_topic',
-                    fail_if_exists=True,
-                )
+        with DAG("failing DAG") as dag:
+            create_topic = PubSubCreateTopicOperator(project_id="my-project", topic="my_new_topic")
+            create_topic_again = PubSubCreateTopicOperator(
+                project_id="my-project", topic="my_new_topic", fail_if_exists=True
             )
+
+            create_topic >> create_topic_again
 
     Both ``project_id`` and ``topic`` are templated so you can use Jinja templating in their values.
 
@@ -123,19 +125,20 @@ class PubSubCreateTopicOperator(GoogleCloudBaseOperator):
         self,
         *,
         topic: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         fail_if_exists: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         labels: dict[str, str] | None = None,
         message_storage_policy: dict | MessageStoragePolicy = None,
         kms_key_name: str | None = None,
+        schema_settings: dict | SchemaSettings = None,
+        message_retention_duration: str | None = None,
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
         metadata: Sequence[tuple[str, str]] = (),
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
     ) -> None:
-
         super().__init__(**kwargs)
         self.project_id = project_id
         self.topic = topic
@@ -144,6 +147,8 @@ class PubSubCreateTopicOperator(GoogleCloudBaseOperator):
         self.labels = labels
         self.message_storage_policy = message_storage_policy
         self.kms_key_name = kms_key_name
+        self.schema_settings = schema_settings
+        self.message_retention_duration = message_retention_duration
         self.retry = retry
         self.timeout = timeout
         self.metadata = metadata
@@ -163,6 +168,8 @@ class PubSubCreateTopicOperator(GoogleCloudBaseOperator):
             labels=self.labels,
             message_storage_policy=self.message_storage_policy,
             kms_key_name=self.kms_key_name,
+            schema_settings=self.schema_settings,
+            message_retention_duration=self.message_retention_duration,
             retry=self.retry,
             timeout=self.timeout,
             metadata=self.metadata,
@@ -190,43 +197,35 @@ class PubSubCreateSubscriptionOperator(GoogleCloudBaseOperator):
     By default, if the subscription already exists, this operator will
     not cause the DAG to fail. However, the topic must exist in the project. ::
 
-        with DAG('successful DAG') as dag:
-            (
-                PubSubCreateSubscriptionOperator(
-                    project_id='my-project',
-                    topic='my-topic',
-                    subscription='my-subscription'
-                )
-                >> PubSubCreateSubscriptionOperator(
-                    project_id='my-project',
-                    topic='my-topic',
-                    subscription='my-subscription',
-                )
+        with DAG("successful DAG") as dag:
+            create_subscription = PubSubCreateSubscriptionOperator(
+                project_id="my-project", topic="my-topic", subscription="my-subscription"
             )
+            create_subscription_again = PubSubCreateSubscriptionOperator(
+                project_id="my-project", topic="my-topic", subscription="my-subscription"
+            )
+
+            create_subscription >> create_subscription_again
+
 
     The operator can be configured to fail if the subscription already exists.
     ::
 
-        with DAG('failing DAG') as dag:
-            (
-                PubSubCreateSubscriptionOperator(
-                    project_id='my-project',
-                    topic='my-topic',
-                    subscription='my-subscription',
-                )
-                >> PubSubCreateSubscriptionOperator(
-                    project_id='my-project',
-                    topic='my-topic',
-                    subscription='my-subscription',
-                    fail_if_exists=True,
-                )
+        with DAG("failing DAG") as dag:
+            create_subscription = PubSubCreateSubscriptionOperator(
+                project_id="my-project", topic="my-topic", subscription="my-subscription"
             )
+            create_subscription_again = PubSubCreateSubscriptionOperator(
+                project_id="my-project", topic="my-topic", subscription="my-subscription", fail_if_exists=True
+            )
+
+            create_subscription >> create_subscription_again
 
     Finally, subscription is not required. If not passed, the operator will
     generated a universally unique identifier for the subscription's name. ::
 
-        with DAG('DAG') as dag:
-            PubSubCreateSubscriptionOperator(project_id='my-project', topic='my-topic')
+        with DAG("DAG") as dag:
+            PubSubCreateSubscriptionOperator(project_id="my-project", topic="my-topic")
 
     ``project_id``, ``topic``, ``subscription``, ``subscription_project_id`` and
     ``impersonation_chain`` are templated so you can use Jinja templating in their values.
@@ -312,7 +311,7 @@ class PubSubCreateSubscriptionOperator(GoogleCloudBaseOperator):
         self,
         *,
         topic: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         subscription: str | None = None,
         subscription_project_id: str | None = None,
         ack_deadline_secs: int = 10,
@@ -403,14 +402,16 @@ class PubSubDeleteTopicOperator(GoogleCloudBaseOperator):
     By default, if the topic does not exist, this operator will
     not cause the DAG to fail. ::
 
-        with DAG('successful DAG') as dag:
-            PubSubDeleteTopicOperator(project_id='my-project', topic='non_existing_topic')
+        with DAG("successful DAG") as dag:
+            PubSubDeleteTopicOperator(project_id="my-project", topic="non_existing_topic")
 
     The operator can be configured to fail if the topic does not exist. ::
 
-        with DAG('failing DAG') as dag:
+        with DAG("failing DAG") as dag:
             PubSubDeleteTopicOperator(
-                project_id='my-project', topic='non_existing_topic', fail_if_not_exists=True,
+                project_id="my-project",
+                topic="non_existing_topic",
+                fail_if_not_exists=True,
             )
 
     Both ``project_id`` and ``topic`` are templated so you can use Jinja templating in their values.
@@ -452,7 +453,7 @@ class PubSubDeleteTopicOperator(GoogleCloudBaseOperator):
         self,
         *,
         topic: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         fail_if_not_exists: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         retry: Retry | _MethodDefault = DEFAULT,
@@ -499,16 +500,18 @@ class PubSubDeleteSubscriptionOperator(GoogleCloudBaseOperator):
     By default, if the subscription does not exist, this operator will
     not cause the DAG to fail. ::
 
-        with DAG('successful DAG') as dag:
-            PubSubDeleteSubscriptionOperator(project_id='my-project', subscription='non-existing')
+        with DAG("successful DAG") as dag:
+            PubSubDeleteSubscriptionOperator(project_id="my-project", subscription="non-existing")
 
     The operator can be configured to fail if the subscription already exists.
 
     ::
 
-        with DAG('failing DAG') as dag:
+        with DAG("failing DAG") as dag:
             PubSubDeleteSubscriptionOperator(
-                project_id='my-project', subscription='non-existing', fail_if_not_exists=True,
+                project_id="my-project",
+                subscription="non-existing",
+                fail_if_not_exists=True,
             )
 
     ``project_id``, and ``subscription`` are templated so you can use Jinja templating in their values.
@@ -550,7 +553,7 @@ class PubSubDeleteSubscriptionOperator(GoogleCloudBaseOperator):
         self,
         *,
         subscription: str,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         fail_if_not_exists: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         retry: Retry | _MethodDefault = DEFAULT,
@@ -598,17 +601,25 @@ class PubSubPublishMessageOperator(GoogleCloudBaseOperator):
     in a single Google Cloud project. If the topic does not exist, this
     task will fail. ::
 
-        m1 = {'data': b'Hello, World!',
-              'attributes': {'type': 'greeting'}
-             }
-        m2 = {'data': b'Knock, knock'}
-        m3 = {'attributes': {'foo': ''}}
+        m1 = {"data": b"Hello, World!", "attributes": {"type": "greeting"}}
+        m2 = {"data": b"Knock, knock"}
+        m3 = {"attributes": {"foo": ""}}
+        m4 = {"data": b"Who's there?", "attributes": {"ordering_key": "knock_knock"}}
 
         t1 = PubSubPublishMessageOperator(
-            project_id='my-project',
-            topic='my_topic',
+            project_id="my-project",
+            topic="my_topic",
             messages=[m1, m2, m3],
             create_topic=True,
+            dag=dag,
+        )
+
+        t2 = PubSubPublishMessageOperator(
+            project_id="my-project",
+            topic="my_topic",
+            messages=[m4],
+            create_topic=True,
+            enable_message_ordering=True,
             dag=dag,
         )
 
@@ -631,6 +642,10 @@ class PubSubPublishMessageOperator(GoogleCloudBaseOperator):
         https://cloud.google.com/pubsub/docs/reference/rest/v1/PubsubMessage
     :param gcp_conn_id: The connection ID to use connecting to
         Google Cloud.
+    :param enable_message_ordering: If true, messages published with the same
+        ordering_key in PubsubMessage will be delivered to the subscribers in the order
+        in which they are received by the Pub/Sub system. Otherwise, they may be
+        delivered in any order. Default is False.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
         of the last account in the list, which will be impersonated in the request.
@@ -645,6 +660,7 @@ class PubSubPublishMessageOperator(GoogleCloudBaseOperator):
         "project_id",
         "topic",
         "messages",
+        "enable_message_ordering",
         "impersonation_chain",
     )
     ui_color = "#0273d4"
@@ -654,8 +670,9 @@ class PubSubPublishMessageOperator(GoogleCloudBaseOperator):
         *,
         topic: str,
         messages: list,
-        project_id: str | None = None,
+        project_id: str = PROVIDE_PROJECT_ID,
         gcp_conn_id: str = "google_cloud_default",
+        enable_message_ordering: bool = False,
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
     ) -> None:
@@ -664,12 +681,14 @@ class PubSubPublishMessageOperator(GoogleCloudBaseOperator):
         self.topic = topic
         self.messages = messages
         self.gcp_conn_id = gcp_conn_id
+        self.enable_message_ordering = enable_message_ordering
         self.impersonation_chain = impersonation_chain
 
     def execute(self, context: Context) -> None:
         hook = PubSubHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
+            enable_message_ordering=self.enable_message_ordering,
         )
 
         self.log.info("Publishing to topic %s", self.topic)
@@ -709,7 +728,7 @@ class PubSubPullOperator(GoogleCloudBaseOperator):
     :param gcp_conn_id: The connection ID to use connecting to
         Google Cloud.
     :param messages_callback: (Optional) Callback to process received messages.
-        It's return value will be saved to XCom.
+        Its return value will be saved to XCom.
         If you are pulling large messages, you probably want to provide a custom callback.
         If not provided, the default implementation will convert `ReceivedMessage` objects
         into JSON-serializable dicts using `google.protobuf.json_format.MessageToDict` function.
@@ -782,6 +801,8 @@ class PubSubPullOperator(GoogleCloudBaseOperator):
         context: Context,
     ) -> list:
         """
+        Act as a default message callback.
+
         This method can be overridden by subclasses or by `messages_callback` constructor argument.
 
         This default implementation converts `ReceivedMessage` objects into JSON-serializable dicts.

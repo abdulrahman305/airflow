@@ -18,14 +18,23 @@
 from __future__ import annotations
 
 from unittest import mock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from airflow import AirflowException
-from airflow.providers.amazon.aws.hooks.glue import GlueJobHook
+from airflow.exceptions import AirflowException
+from airflow.providers.amazon.aws.hooks.glue import GlueDataQualityHook, GlueJobHook
 from airflow.providers.amazon.aws.hooks.glue_catalog import GlueCatalogHook
-from airflow.providers.amazon.aws.triggers.glue import GlueCatalogPartitionTrigger, GlueJobCompleteTrigger
-from airflow.providers.amazon.aws.triggers.glue_crawler import GlueCrawlerCompleteTrigger
+from airflow.providers.amazon.aws.triggers.glue import (
+    GlueCatalogPartitionTrigger,
+    GlueDataQualityRuleRecommendationRunCompleteTrigger,
+    GlueDataQualityRuleSetEvaluationRunCompleteTrigger,
+    GlueJobCompleteTrigger,
+)
+from airflow.triggers.base import TriggerEvent
+from tests.providers.amazon.aws.utils.test_waiter import assert_expected_waiter_type
+
+BASE_TRIGGER_CLASSPATH = "airflow.providers.amazon.aws.triggers.glue."
 
 
 class TestGlueJobTrigger:
@@ -46,7 +55,7 @@ class TestGlueJobTrigger:
         ]
 
         generator = trigger.run()
-        event = await generator.asend(None)
+        event = await generator.asend(None)  # type:ignore[attr-defined]
 
         assert get_state_mock.call_count == 3
         assert event.payload["status"] == "success"
@@ -68,49 +77,12 @@ class TestGlueJobTrigger:
         ]
 
         with pytest.raises(AirflowException):
-            await trigger.run().asend(None)
+            await trigger.run().asend(None)  # type:ignore[attr-defined]
 
         assert get_state_mock.call_count == 3
 
 
-class TestGlueCrawlerTrigger:
-    def test_serialize_recreate(self):
-        trigger = GlueCrawlerCompleteTrigger(
-            crawler_name="my_crawler", waiter_delay=2, aws_conn_id="my_conn_id"
-        )
-
-        class_path, args = trigger.serialize()
-
-        class_name = class_path.split(".")[-1]
-        clazz = globals()[class_name]
-        instance = clazz(**args)
-
-        class_path2, args2 = instance.serialize()
-
-        assert class_path == class_path2
-        assert args == args2
-
-
 class TestGlueCatalogPartitionSensorTrigger:
-    def test_serialize_recreate(self):
-        trigger = GlueCatalogPartitionTrigger(
-            database_name="my_database",
-            table_name="my_table",
-            expression="my_expression",
-            aws_conn_id="my_conn_id",
-        )
-
-        class_path, args = trigger.serialize()
-
-        class_name = class_path.split(".")[-1]
-        clazz = globals()[class_name]
-        instance = clazz(**args)
-
-        class_path2, args2 = instance.serialize()
-
-        assert class_path == class_path2
-        assert args == args2
-
     @pytest.mark.asyncio
     @mock.patch.object(GlueCatalogHook, "async_get_partitions")
     async def test_poke(self, mock_async_get_partitions):
@@ -126,3 +98,57 @@ class TestGlueCatalogPartitionSensorTrigger:
         response = await trigger.poke(client=mock.MagicMock())
 
         assert response is True
+
+
+class TestGlueDataQualityEvaluationRunCompletedTrigger:
+    EXPECTED_WAITER_NAME = "data_quality_ruleset_evaluation_run_complete"
+    RUN_ID = "1234567890abc"
+
+    def test_serialization(self):
+        """Assert that arguments and classpath are correctly serialized."""
+        trigger = GlueDataQualityRuleSetEvaluationRunCompleteTrigger(evaluation_run_id=self.RUN_ID)
+        classpath, kwargs = trigger.serialize()
+        assert classpath == BASE_TRIGGER_CLASSPATH + "GlueDataQualityRuleSetEvaluationRunCompleteTrigger"
+        assert kwargs.get("evaluation_run_id") == self.RUN_ID
+
+    @pytest.mark.asyncio
+    @mock.patch.object(GlueDataQualityHook, "get_waiter")
+    @mock.patch.object(GlueDataQualityHook, "async_conn")
+    async def test_run_success(self, mock_async_conn, mock_get_waiter):
+        mock_async_conn.__aenter__.return_value = mock.MagicMock()
+        mock_get_waiter().wait = AsyncMock()
+        trigger = GlueDataQualityRuleSetEvaluationRunCompleteTrigger(evaluation_run_id=self.RUN_ID)
+
+        generator = trigger.run()
+        response = await generator.asend(None)
+
+        assert response == TriggerEvent({"status": "success", "evaluation_run_id": self.RUN_ID})
+        assert_expected_waiter_type(mock_get_waiter, self.EXPECTED_WAITER_NAME)
+        mock_get_waiter().wait.assert_called_once()
+
+
+class TestGlueDataQualityRuleRecommendationRunCompleteTrigger:
+    EXPECTED_WAITER_NAME = "data_quality_rule_recommendation_run_complete"
+    RUN_ID = "1234567890abc"
+
+    def test_serialization(self):
+        """Assert that arguments and classpath are correctly serialized."""
+        trigger = GlueDataQualityRuleRecommendationRunCompleteTrigger(recommendation_run_id=self.RUN_ID)
+        classpath, kwargs = trigger.serialize()
+        assert classpath == BASE_TRIGGER_CLASSPATH + "GlueDataQualityRuleRecommendationRunCompleteTrigger"
+        assert kwargs.get("recommendation_run_id") == self.RUN_ID
+
+    @pytest.mark.asyncio
+    @mock.patch.object(GlueDataQualityHook, "get_waiter")
+    @mock.patch.object(GlueDataQualityHook, "async_conn")
+    async def test_run_success(self, mock_async_conn, mock_get_waiter):
+        mock_async_conn.__aenter__.return_value = mock.MagicMock()
+        mock_get_waiter().wait = AsyncMock()
+        trigger = GlueDataQualityRuleRecommendationRunCompleteTrigger(recommendation_run_id=self.RUN_ID)
+
+        generator = trigger.run()
+        response = await generator.asend(None)
+
+        assert response == TriggerEvent({"status": "success", "recommendation_run_id": self.RUN_ID})
+        assert_expected_waiter_type(mock_get_waiter, self.EXPECTED_WAITER_NAME)
+        mock_get_waiter().wait.assert_called_once()
