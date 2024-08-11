@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
+
 if TYPE_CHECKING:
     from mypy_boto3_s3.service_resource import Bucket as S3Bucket, Object as S3ResourceObject
 
@@ -60,6 +62,12 @@ from airflow.providers.amazon.aws.utils.tags import format_tags
 from airflow.utils.helpers import chunks
 
 logger = logging.getLogger(__name__)
+
+
+# Explicit value that would remove ACLs from a copy
+# No conflicts with Canned ACLs:
+#   https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
+NO_ACL = "no-acl"
 
 
 def provide_bucket_name(func: Callable) -> Callable:
@@ -1105,6 +1113,12 @@ class S3Hook(AwsBaseHook):
 
         client = self.get_conn()
         client.upload_file(filename, bucket_name, key, ExtraArgs=extra_args, Config=self.transfer_config)
+        get_hook_lineage_collector().add_input_dataset(
+            context=self, scheme="file", dataset_kwargs={"path": filename}
+        )
+        get_hook_lineage_collector().add_output_dataset(
+            context=self, scheme="s3", dataset_kwargs={"bucket": bucket_name, "key": key}
+        )
 
     @unify_bucket_name_and_key
     @provide_bucket_name
@@ -1245,6 +1259,10 @@ class S3Hook(AwsBaseHook):
             ExtraArgs=extra_args,
             Config=self.transfer_config,
         )
+        # No input because file_obj can be anything - handle in calling function if possible
+        get_hook_lineage_collector().add_output_dataset(
+            context=self, scheme="s3", dataset_kwargs={"bucket": bucket_name, "key": key}
+        )
 
     def copy_object(
         self,
@@ -1285,6 +1303,8 @@ class S3Hook(AwsBaseHook):
             object to be copied which is private by default.
         """
         acl_policy = acl_policy or "private"
+        if acl_policy != NO_ACL:
+            kwargs["ACL"] = acl_policy
 
         dest_bucket_name, dest_bucket_key = self.get_s3_bucket_key(
             dest_bucket_name, dest_bucket_key, "dest_bucket_name", "dest_bucket_key"
@@ -1296,7 +1316,13 @@ class S3Hook(AwsBaseHook):
 
         copy_source = {"Bucket": source_bucket_name, "Key": source_bucket_key, "VersionId": source_version_id}
         response = self.get_conn().copy_object(
-            Bucket=dest_bucket_name, Key=dest_bucket_key, CopySource=copy_source, ACL=acl_policy, **kwargs
+            Bucket=dest_bucket_name, Key=dest_bucket_key, CopySource=copy_source, **kwargs
+        )
+        get_hook_lineage_collector().add_input_dataset(
+            context=self, scheme="s3", dataset_kwargs={"bucket": source_bucket_name, "key": source_bucket_key}
+        )
+        get_hook_lineage_collector().add_output_dataset(
+            context=self, scheme="s3", dataset_kwargs={"bucket": dest_bucket_name, "key": dest_bucket_key}
         )
         return response
 
@@ -1417,6 +1443,11 @@ class S3Hook(AwsBaseHook):
 
             file_path.parent.mkdir(exist_ok=True, parents=True)
 
+            get_hook_lineage_collector().add_output_dataset(
+                context=self,
+                scheme="file",
+                dataset_kwargs={"path": file_path if file_path.is_absolute() else file_path.absolute()},
+            )
             file = open(file_path, "wb")
         else:
             file = NamedTemporaryFile(dir=local_path, prefix="airflow_tmp_", delete=False)  # type: ignore
@@ -1427,7 +1458,9 @@ class S3Hook(AwsBaseHook):
                 ExtraArgs=self.extra_args,
                 Config=self.transfer_config,
             )
-
+        get_hook_lineage_collector().add_input_dataset(
+            context=self, scheme="s3", dataset_kwargs={"bucket": bucket_name, "key": key}
+        )
         return file.name
 
     def generate_presigned_url(

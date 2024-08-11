@@ -57,7 +57,7 @@ securityContexts:
   pod: {}
   containers: {}
 
-# Default container lifecycle hooks for every service except for redis, statsd and pgbouncer.
+# Global container lifecycle hooks for airflow containers
 containerLifecycleHooks: {}
 
 # Airflow home directory
@@ -68,13 +68,13 @@ airflowHome: /opt/airflow
 defaultAirflowRepository: apache/airflow
 
 # Default airflow tag to deploy
-defaultAirflowTag: "2.9.2"
+defaultAirflowTag: "2.9.3"
 
 # Default airflow digest. If specified, it takes precedence over tag
 defaultAirflowDigest: ~
 
 # Airflow version (Used to make some decisions based on Airflow Version being deployed)
-airflowVersion: "2.9.2"
+airflowVersion: "2.9.3"
 
 # Images
 images:
@@ -245,7 +245,8 @@ airflowLocalSettings: |-
     UIAlert(
       'Usage of a dynamic webserver secret key detected. We recommend a static webserver secret key instead.'
       ' See the <a href='
-      '"https://airflow.apache.org/docs/helm-chart/stable/production-guide.html#webserver-secret-key">'
+      '"https://airflow.apache.org/docs/helm-chart/stable/production-guide.html#webserver-secret-key" '
+      'target="_blank" rel="noopener noreferrer">'
       'Helm Chart Production Guide</a> for more details.',
       category="warning",
       roles=["Admin"],
@@ -341,6 +342,11 @@ extraSecrets: {}
 #   '{{ .Release.Name }}-other-secret-name-suffix':
 #     data: |
 #        ...
+#   'proxy-config':
+#     stringData: |
+#        HTTP_PROXY: http://proxy_user:proxy_password@192.168.0.10:2080
+#        HTTPS_PROXY: http://proxy_user:proxy_password@192.168.0.10:2080
+#        NO_PROXY: "localhost,127.0.0.1,.svc.cluster.local,kubernetes.default.svc"
 
 # Extra ConfigMaps that will be managed by the chart
 # (You can use them with extraEnv or extraEnvFrom or some of the extraVolumes values).
@@ -1688,6 +1694,10 @@ triggerer:
       SELECT ceil(COUNT(*)::decimal / {{ .Values.config.triggerer.default_capacity }})
       FROM trigger
 
+    # Whether to use PGBouncer to connect to the database or not when it is enabled
+    # This configuration will be ignored if PGBouncer is not enabled
+    usePgbouncer: false
+
 # Airflow Dag Processor Config
 dagProcessor:
   enabled: false
@@ -2134,6 +2144,7 @@ pgbouncer:
 
   service:
     extraAnnotations: {}
+    clusterIp: ~
 
   # https://www.pgbouncer.org/config.html
   verbose: 0
@@ -2650,6 +2661,11 @@ dags:
     # For backwards compatibility, wait will be used if it is specified.
     period: 5s
     wait: ~
+    # add variables from secret into gitSync containers, such proxy-config
+    envFrom: ~
+    # envFrom: |
+    #   - secretRef:
+    #       name: 'proxy-config'
 
     containerName: git-sync
     uid: 65533
