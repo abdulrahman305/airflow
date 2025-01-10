@@ -23,32 +23,46 @@ import contextlib
 import copy
 import functools
 import warnings
-from typing import (
-    TYPE_CHECKING,
-    Any,
+from collections.abc import (
     Container,
     ItemsView,
     Iterator,
     KeysView,
     Mapping,
     MutableMapping,
-    SupportsIndex,
     ValuesView,
+)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    SupportsIndex,
+    Union,
 )
 
 import attrs
 import lazy_object_proxy
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
-from airflow.datasets import (
-    Dataset,
-    DatasetAlias,
-    DatasetAliasEvent,
-    extract_event_key,
-)
 from airflow.exceptions import RemovedInAirflow3Warning
-from airflow.models.dataset import DatasetAliasModel, DatasetEvent, DatasetModel
+from airflow.models.asset import (
+    AssetAliasModel,
+    AssetEvent,
+    AssetModel,
+    fetch_active_assets_by_name,
+    fetch_active_assets_by_uri,
+)
+from airflow.sdk.definitions.asset import (
+    Asset,
+    AssetAlias,
+    AssetAliasUniqueKey,
+    AssetNameRef,
+    AssetRef,
+    AssetUniqueKey,
+    AssetUriRef,
+    BaseAssetUniqueKey,
+)
 from airflow.utils.db import LazySelectSequence
+from airflow.utils.session import create_session
 from airflow.utils.types import NOTSET
 
 if TYPE_CHECKING:
@@ -62,7 +76,6 @@ if TYPE_CHECKING:
 # * Context in airflow/utils/context.pyi.
 # * Table in docs/apache-airflow/templates-ref.rst
 KNOWN_CONTEXT_KEYS: set[str] = {
-    "conf",
     "conn",
     "dag",
     "dag_run",
@@ -70,7 +83,6 @@ KNOWN_CONTEXT_KEYS: set[str] = {
     "data_interval_start",
     "ds",
     "ds_nodash",
-    "execution_date",
     "expanded_ti_count",
     "exception",
     "inlets",
@@ -78,18 +90,11 @@ KNOWN_CONTEXT_KEYS: set[str] = {
     "logical_date",
     "macros",
     "map_index_template",
-    "next_ds",
-    "next_ds_nodash",
-    "next_execution_date",
     "outlets",
     "outlet_events",
     "params",
     "prev_data_interval_start_success",
     "prev_data_interval_end_success",
-    "prev_ds",
-    "prev_ds_nodash",
-    "prev_execution_date",
-    "prev_execution_date_success",
     "prev_start_date_success",
     "prev_end_date_success",
     "reason",
@@ -100,16 +105,12 @@ KNOWN_CONTEXT_KEYS: set[str] = {
     "test_mode",
     "templates_dict",
     "ti",
-    "tomorrow_ds",
-    "tomorrow_ds_nodash",
-    "triggering_dataset_events",
+    "triggering_asset_events",
     "ts",
     "ts_nodash",
     "ts_nodash_with_tz",
     "try_number",
     "var",
-    "yesterday_ds",
-    "yesterday_ds_nodash",
 }
 
 
@@ -163,136 +164,201 @@ class ConnectionAccessor:
 
 
 @attrs.define()
+class AssetAliasEvent:
+    """
+    Represeation of asset event to be triggered by an asset alias.
+
+    :meta private:
+    """
+
+    source_alias_name: str
+    dest_asset_key: AssetUniqueKey
+    extra: dict[str, Any]
+
+
+@attrs.define()
 class OutletEventAccessor:
     """
-    Wrapper to access an outlet dataset event in template.
+    Wrapper to access an outlet asset event in template.
 
     :meta private:
     """
 
-    raw_key: str | Dataset | DatasetAlias
+    key: BaseAssetUniqueKey
     extra: dict[str, Any] = attrs.Factory(dict)
-    dataset_alias_event: DatasetAliasEvent | None = None
+    asset_alias_events: list[AssetAliasEvent] = attrs.field(factory=list)
 
-    def add(self, dataset: Dataset | str, extra: dict[str, Any] | None = None) -> None:
-        """Add a DatasetEvent to an existing Dataset."""
-        if isinstance(dataset, str):
-            dataset_uri = dataset
-        elif isinstance(dataset, Dataset):
-            dataset_uri = dataset.uri
-        else:
+    def add(self, asset: Asset, extra: dict[str, Any] | None = None) -> None:
+        """Add an AssetEvent to an existing Asset."""
+        if not isinstance(self.key, AssetAliasUniqueKey):
             return
 
-        if isinstance(self.raw_key, str):
-            dataset_alias_name = self.raw_key
-        elif isinstance(self.raw_key, DatasetAlias):
-            dataset_alias_name = self.raw_key.name
-        else:
-            return
-
-        if extra:
-            self.extra = extra
-
-        self.dataset_alias_event = DatasetAliasEvent(
-            source_alias_name=dataset_alias_name, dest_dataset_uri=dataset_uri
+        asset_alias_name = self.key.name
+        event = AssetAliasEvent(
+            source_alias_name=asset_alias_name,
+            dest_asset_key=AssetUniqueKey.from_asset(asset),
+            extra=extra or {},
         )
+        self.asset_alias_events.append(event)
 
 
-class OutletEventAccessors(Mapping[str, OutletEventAccessor]):
+class OutletEventAccessors(Mapping[Union[Asset, AssetAlias], OutletEventAccessor]):
     """
-    Lazy mapping of outlet dataset event accessors.
+    Lazy mapping of outlet asset event accessors.
 
     :meta private:
     """
+
+    _asset_ref_cache: dict[AssetRef, AssetUniqueKey] = {}
 
     def __init__(self) -> None:
-        self._dict: dict[str, OutletEventAccessor] = {}
+        self._dict: dict[BaseAssetUniqueKey, OutletEventAccessor] = {}
 
     def __str__(self) -> str:
         return f"OutletEventAccessors(_dict={self._dict})"
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._dict)
+    def __iter__(self) -> Iterator[Asset | AssetAlias]:
+        return (
+            key.to_asset() if isinstance(key, AssetUniqueKey) else key.to_asset_alias() for key in self._dict
+        )
 
     def __len__(self) -> int:
         return len(self._dict)
 
-    def __getitem__(self, key: str | Dataset | DatasetAlias) -> OutletEventAccessor:
-        event_key = extract_event_key(key)
-        if event_key not in self._dict:
-            self._dict[event_key] = OutletEventAccessor(extra={}, raw_key=key)
-        return self._dict[event_key]
+    def __getitem__(self, key: Asset | AssetAlias) -> OutletEventAccessor:
+        hashable_key: BaseAssetUniqueKey
+        if isinstance(key, Asset):
+            hashable_key = AssetUniqueKey.from_asset(key)
+        elif isinstance(key, AssetAlias):
+            hashable_key = AssetAliasUniqueKey.from_asset_alias(key)
+        elif isinstance(key, AssetRef):
+            hashable_key = self._resolve_asset_ref(key)
+        else:
+            raise TypeError(f"Key should be either an asset or an asset alias, not {type(key)}")
+
+        if hashable_key not in self._dict:
+            self._dict[hashable_key] = OutletEventAccessor(extra={}, key=hashable_key)
+        return self._dict[hashable_key]
+
+    def _resolve_asset_ref(self, ref: AssetRef) -> AssetUniqueKey:
+        with contextlib.suppress(KeyError):
+            return self._asset_ref_cache[ref]
+
+        refs_to_cache: list[AssetRef]
+        with create_session() as session:
+            if isinstance(ref, AssetNameRef):
+                asset = session.scalar(
+                    select(AssetModel).where(AssetModel.name == ref.name, AssetModel.active.has())
+                )
+                refs_to_cache = [ref, AssetUriRef(asset.uri)]
+            elif isinstance(ref, AssetUriRef):
+                asset = session.scalar(
+                    select(AssetModel).where(AssetModel.uri == ref.uri, AssetModel.active.has())
+                )
+                refs_to_cache = [ref, AssetNameRef(asset.name)]
+            else:
+                raise TypeError(f"Unimplemented asset ref: {type(ref)}")
+            for ref in refs_to_cache:
+                self._asset_ref_cache[ref] = unique_key = AssetUniqueKey.from_asset(asset)
+        return unique_key
 
 
-class LazyDatasetEventSelectSequence(LazySelectSequence[DatasetEvent]):
+class LazyAssetEventSelectSequence(LazySelectSequence[AssetEvent]):
     """
-    List-like interface to lazily access DatasetEvent rows.
+    List-like interface to lazily access AssetEvent rows.
 
     :meta private:
     """
 
     @staticmethod
     def _rebuild_select(stmt: TextClause) -> Select:
-        return select(DatasetEvent).from_statement(stmt)
+        return select(AssetEvent).from_statement(stmt)
 
     @staticmethod
-    def _process_row(row: Row) -> DatasetEvent:
+    def _process_row(row: Row) -> AssetEvent:
         return row[0]
 
 
 @attrs.define(init=False)
-class InletEventsAccessors(Mapping[str, LazyDatasetEventSelectSequence]):
+class InletEventsAccessors(Mapping[Union[int, Asset, AssetAlias, AssetRef], LazyAssetEventSelectSequence]):
     """
-    Lazy mapping for inlet dataset events accessors.
+    Lazy mapping for inlet asset events accessors.
 
     :meta private:
     """
 
     _inlets: list[Any]
-    _datasets: dict[str, Dataset]
-    _dataset_aliases: dict[str, DatasetAlias]
+    _assets: dict[AssetUniqueKey, Asset]
+    _asset_aliases: dict[AssetAliasUniqueKey, AssetAlias]
     _session: Session
 
     def __init__(self, inlets: list, *, session: Session) -> None:
         self._inlets = inlets
         self._session = session
-        self._datasets = {}
-        self._dataset_aliases = {}
+        self._assets = {}
+        self._asset_aliases = {}
 
+        _asset_ref_names: list[str] = []
+        _asset_ref_uris: list[str] = []
         for inlet in inlets:
-            if isinstance(inlet, Dataset):
-                self._datasets[inlet.uri] = inlet
-            elif isinstance(inlet, DatasetAlias):
-                self._dataset_aliases[inlet.name] = inlet
+            if isinstance(inlet, Asset):
+                self._assets[AssetUniqueKey.from_asset(inlet)] = inlet
+            elif isinstance(inlet, AssetAlias):
+                self._asset_aliases[AssetAliasUniqueKey.from_asset_alias(inlet)] = inlet
+            elif isinstance(inlet, AssetNameRef):
+                _asset_ref_names.append(inlet.name)
+            elif isinstance(inlet, AssetUriRef):
+                _asset_ref_uris.append(inlet.uri)
 
-    def __iter__(self) -> Iterator[str]:
+        if _asset_ref_names:
+            for _, asset in fetch_active_assets_by_name(_asset_ref_names, self._session).items():
+                self._assets[AssetUniqueKey.from_asset(asset)] = asset
+        if _asset_ref_uris:
+            for _, asset in fetch_active_assets_by_uri(_asset_ref_uris, self._session).items():
+                self._assets[AssetUniqueKey.from_asset(asset)] = asset
+
+    def __iter__(self) -> Iterator[Asset | AssetAlias]:
         return iter(self._inlets)
 
     def __len__(self) -> int:
         return len(self._inlets)
 
-    def __getitem__(self, key: int | str | Dataset | DatasetAlias) -> LazyDatasetEventSelectSequence:
+    def __getitem__(self, key: int | Asset | AssetAlias | AssetRef) -> LazyAssetEventSelectSequence:
         if isinstance(key, int):  # Support index access; it's easier for trivial cases.
             obj = self._inlets[key]
-            if not isinstance(obj, (Dataset, DatasetAlias)):
+            if not isinstance(obj, (Asset, AssetAlias, AssetRef)):
                 raise IndexError(key)
         else:
             obj = key
 
-        if isinstance(obj, DatasetAlias):
-            dataset_alias = self._dataset_aliases[obj.name]
-            join_clause = DatasetEvent.source_aliases
-            where_clause = DatasetAliasModel.name == dataset_alias.name
-        elif isinstance(obj, (Dataset, str)):
-            dataset = self._datasets[extract_event_key(obj)]
-            join_clause = DatasetEvent.dataset
-            where_clause = DatasetModel.uri == dataset.uri
+        if isinstance(obj, Asset):
+            asset = self._assets[AssetUniqueKey.from_asset(obj)]
+            join_clause = AssetEvent.asset
+            where_clause = and_(AssetModel.name == asset.name, AssetModel.uri == asset.uri)
+        elif isinstance(obj, AssetAlias):
+            asset_alias = self._asset_aliases[AssetAliasUniqueKey.from_asset_alias(obj)]
+            join_clause = AssetEvent.source_aliases
+            where_clause = AssetAliasModel.name == asset_alias.name
+        elif isinstance(obj, AssetNameRef):
+            try:
+                asset = next(a for k, a in self._assets.items() if k.name == obj.name)
+            except StopIteration:
+                raise KeyError(obj) from None
+            join_clause = AssetEvent.asset
+            where_clause = and_(AssetModel.name == asset.name, AssetModel.active.has())
+        elif isinstance(obj, AssetUriRef):
+            try:
+                asset = next(a for k, a in self._assets.items() if k.uri == obj.uri)
+            except StopIteration:
+                raise KeyError(obj) from None
+            join_clause = AssetEvent.asset
+            where_clause = and_(AssetModel.uri == asset.uri, AssetModel.active.has())
         else:
             raise ValueError(key)
 
-        return LazyDatasetEventSelectSequence.from_select(
-            select(DatasetEvent).join(join_clause).where(where_clause),
-            order_by=[DatasetEvent.timestamp],
+        return LazyAssetEventSelectSequence.from_select(
+            select(AssetEvent).join(join_clause).where(where_clause),
+            order_by=[AssetEvent.timestamp],
             session=self._session,
         )
 
@@ -321,20 +387,7 @@ class Context(MutableMapping[str, Any]):
     (and only when) deprecated context keys are accessed.
     """
 
-    _DEPRECATION_REPLACEMENTS: dict[str, list[str]] = {
-        "execution_date": ["data_interval_start", "logical_date"],
-        "next_ds": ["{{ data_interval_end | ds }}"],
-        "next_ds_nodash": ["{{ data_interval_end | ds_nodash }}"],
-        "next_execution_date": ["data_interval_end"],
-        "prev_ds": [],
-        "prev_ds_nodash": [],
-        "prev_execution_date": [],
-        "prev_execution_date_success": ["prev_data_interval_start_success"],
-        "tomorrow_ds": [],
-        "tomorrow_ds_nodash": [],
-        "yesterday_ds": [],
-        "yesterday_ds_nodash": [],
-    }
+    _DEPRECATION_REPLACEMENTS: dict[str, list[str]] = {}
 
     def __init__(self, context: MutableMapping[str, Any] | None = None, **kwargs: Any) -> None:
         self._context: MutableMapping[str, Any] = context or {}
@@ -407,7 +460,7 @@ class Context(MutableMapping[str, Any]):
         return ValuesView(self._context)
 
 
-def context_merge(context: Context, *args: Any, **kwargs: Any) -> None:
+def context_merge(context: Mapping[str, Any], *args: Any, **kwargs: Any) -> None:
     """
     Merge parameters into an existing context.
 
@@ -420,10 +473,13 @@ def context_merge(context: Context, *args: Any, **kwargs: Any) -> None:
 
     :meta private:
     """
+    if not context:
+        context = Context()
+
     context.update(*args, **kwargs)
 
 
-def context_update_for_unmapped(context: Context, task: BaseOperator) -> None:
+def context_update_for_unmapped(context: Mapping[str, Any], task: BaseOperator) -> None:
     """
     Update context after task unmapping.
 
@@ -439,7 +495,7 @@ def context_update_for_unmapped(context: Context, task: BaseOperator) -> None:
     context["params"] = process_params(context["dag"], task, context["dag_run"], suppress_exception=False)
 
 
-def context_copy_partial(source: Context, keys: Container[str]) -> Context:
+def context_copy_partial(source: Mapping[str, Any], keys: Container[str]) -> Context:
     """
     Create a context by copying items under selected keys in ``source``.
 
@@ -471,7 +527,7 @@ def lazy_mapping_from_context(source: Context) -> Mapping[str, Any]:
     """
     if not isinstance(source, Context):
         # Sometimes we are passed a plain dict (usually in tests, or in User's
-        # custom operators) -- be lienent about what we accept so we don't
+        # custom operators) -- be lenient about what we accept so we don't
         # break anything for users.
         return source
 

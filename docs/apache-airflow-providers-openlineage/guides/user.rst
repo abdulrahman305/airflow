@@ -189,8 +189,6 @@ If not set, it's using ``default`` namespace. Provide the name of the namespace 
 
   AIRFLOW__OPENLINEAGE__NAMESPACE='my-team-airflow-instance'
 
-.. _options:disable:
-
 Timeout
 ^^^^^^^
 
@@ -210,6 +208,7 @@ The code runs with default timeout of 10 seconds. You can increase this by setti
 
   AIRFLOW__OPENLINEAGE__EXECUTION_TIMEOUT=60
 
+.. _options:disable:
 
 Disable
 ^^^^^^^
@@ -258,13 +257,13 @@ full import paths of Airflow Operators to disable as ``disabled_for_operators`` 
 
     [openlineage]
     transport = {"type": "http", "url": "http://example.com:5000", "endpoint": "api/v1/lineage"}
-    disabled_for_operators = 'airflow.operators.bash.BashOperator;airflow.operators.python.PythonOperator'
+    disabled_for_operators = 'airflow.providers.standard.operators.bash.BashOperator;airflow.providers.standard.operators.python.PythonOperator'
 
 ``AIRFLOW__OPENLINEAGE__DISABLED_FOR_OPERATORS`` environment variable is an equivalent.
 
 .. code-block:: ini
 
-  AIRFLOW__OPENLINEAGE__DISABLED_FOR_OPERATORS='airflow.operators.bash.BashOperator;airflow.operators.python.PythonOperator'
+  AIRFLOW__OPENLINEAGE__DISABLED_FOR_OPERATORS='airflow.providers.standard.operators.bash.BashOperator;airflow.providers.standard.operators.python.PythonOperator'
 
 Full Task Info
 ^^^^^^^^^^^^^^
@@ -282,6 +281,10 @@ serializing only a few known attributes, we exclude certain non-serializable ele
     include_full_task_info = true
 
 ``AIRFLOW__OPENLINEAGE__INCLUDE_FULL_TASK_INFO`` environment variable is an equivalent.
+
+.. code-block:: ini
+
+  AIRFLOW__OPENLINEAGE__INCLUDE_FULL_TASK_INFO=true
 
 .. warning::
 
@@ -324,6 +327,31 @@ a string of semicolon separated full import paths to ``custom_run_facets`` optio
 
   AIRFLOW__OPENLINEAGE__CUSTOM_RUN_FACETS='full.path.to.get_my_custom_facet;full.path.to.another_custom_facet_function'
 
+.. _options:debug_mode:
+
+Debug Mode
+^^^^^^^^^^
+
+You can enable sending additional information in OpenLineage events that can be useful for debugging and
+reproducing your environment setup by setting ``debug_mode`` option to ``true`` in Airflow configuration.
+
+.. code-block:: ini
+
+    [openlineage]
+    transport = {"type": "http", "url": "http://example.com:5000", "endpoint": "api/v1/lineage"}
+    debug_mode = true
+
+``AIRFLOW__OPENLINEAGE__DEBUG_MODE`` environment variable is an equivalent.
+
+.. code-block:: ini
+
+  AIRFLOW__OPENLINEAGE__DEBUG_MODE=true
+
+.. warning::
+
+  By setting this variable to true, OpenLineage integration may log and emit extensive details. It should only be enabled temporary for debugging purposes.
+
+
 Enabling OpenLineage on DAG/task level
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -334,6 +362,12 @@ To enable this policy, set the ``selective_enable`` option to True in the [openl
 
     [openlineage]
     selective_enable = True
+
+``AIRFLOW__OPENLINEAGE__SELECTIVE_ENABLE`` environment variable is an equivalent.
+
+.. code-block:: ini
+
+  AIRFLOW__OPENLINEAGE__SELECTIVE_ENABLE=true
 
 
 While ``selective_enable`` enables selective control, the ``disabled`` :ref:`option <options:disable>` still has precedence.
@@ -379,11 +413,75 @@ This is because each emitting task sends a `ParentRunFacet <https://openlineage.
 which requires the DAG-level lineage to be enabled in some OpenLineage backend systems.
 Disabling DAG-level lineage while enabling task-level lineage might cause errors or inconsistencies.
 
+.. _options:spark_inject_parent_job_info:
+
+Passing parent job information to Spark jobs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+OpenLineage integration can automatically inject Airflow's information (namespace, job name, run id)
+into Spark application properties as parent job information
+(``spark.openlineage.parentJobNamespace``, ``spark.openlineage.parentJobName``, ``spark.openlineage.parentRunId``),
+for :ref:`supported Operators <supported_classes:openlineage>`.
+It allows Spark integration to automatically include ``parentRunFacet`` in application-level OpenLineage event,
+creating a parent-child relationship between tasks from different integrations.
+See `Scheduling from Airflow <https://openlineage.io/docs/integrations/spark/configuration/airflow>`_.
+
+This configuration serves as the default behavior for all Operators that support automatic Spark properties injection,
+unless it is explicitly overridden at the Operator level.
+To prevent a specific Operator from injecting the parent job information while
+allowing all other supported Operators to do so by default, ``openlineage_inject_parent_job_info=False``
+can be explicitly provided to that specific Operator.
+
+.. note::
+
+  If any of the ``spark.openlineage.parent*`` properties are manually specified in the Spark job configuration, the integration will refrain from injecting parent job properties to ensure that manually provided values are preserved.
+
+You can enable this automation by setting ``spark_inject_parent_job_info`` option to ``true`` in Airflow configuration.
+
+.. code-block:: ini
+
+    [openlineage]
+    transport = {"type": "http", "url": "http://example.com:5000", "endpoint": "api/v1/lineage"}
+    spark_inject_parent_job_info = true
+
+``AIRFLOW__OPENLINEAGE__SPARK_INJECT_PARENT_JOB_INFO`` environment variable is an equivalent.
+
+.. code-block:: ini
+
+  AIRFLOW__OPENLINEAGE__SPARK_INJECT_PARENT_JOB_INFO=true
+
+
+Passing transport information to Spark jobs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+OpenLineage integration can automatically inject Airflow's transport information into Spark application properties,
+for :ref:`supported Operators <supported_classes:openlineage>`.
+It allows Spark integration to send events to the same backend as Airflow integration without manual configuration.
+See `Scheduling from Airflow <https://openlineage.io/docs/integrations/spark/configuration/airflow>`_.
+
+.. note::
+
+  If any of the ``spark.openlineage.transport*`` properties are manually specified in the Spark job configuration, the integration will refrain from injecting transport properties to ensure that manually provided values are preserved.
+
+You can enable this automation by setting ``spark_inject_transport_info`` option to ``true`` in Airflow configuration.
+
+.. code-block:: ini
+
+    [openlineage]
+    transport = {"type": "http", "url": "http://example.com:5000", "endpoint": "api/v1/lineage"}
+    spark_inject_transport_info = true
+
+``AIRFLOW__OPENLINEAGE__SPARK_INJECT_TRANSPORT_INFO`` environment variable is an equivalent.
+
+.. code-block:: ini
+
+  AIRFLOW__OPENLINEAGE__SPARK_INJECT_TRANSPORT_INFO=true
+
 
 Troubleshooting
 ===============
 
-See :ref:`local_troubleshooting:openlineage` for details on how to troubleshoot OpenLineage locally.
+See :ref:`troubleshooting:openlineage` for details on how to troubleshoot OpenLineage.
 
 
 Adding support for custom Operators

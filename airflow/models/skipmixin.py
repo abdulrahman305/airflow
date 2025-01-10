@@ -17,30 +17,25 @@
 # under the License.
 from __future__ import annotations
 
-import warnings
+from collections.abc import Iterable, Sequence
 from types import GeneratorType
-from typing import TYPE_CHECKING, Iterable, Sequence
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select, update
+from sqlalchemy import tuple_, update
 
-from airflow.api_internal.internal_api_call import internal_api_call
-from airflow.exceptions import AirflowException, RemovedInAirflow3Warning
+from airflow.exceptions import AirflowException
 from airflow.models.taskinstance import TaskInstance
 from airflow.utils import timezone
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.sqlalchemy import tuple_in_condition
 from airflow.utils.state import TaskInstanceState
 
 if TYPE_CHECKING:
-    from pendulum import DateTime
-    from sqlalchemy import Session
+    from sqlalchemy.orm import Session
 
     from airflow.models.dagrun import DagRun
     from airflow.models.operator import Operator
-    from airflow.models.taskmixin import DAGNode
-    from airflow.serialization.pydantic.dag_run import DagRunPydantic
-    from airflow.serialization.pydantic.taskinstance import TaskInstancePydantic
+    from airflow.sdk.definitions._internal.node import DAGNode
 
 # The key used by SkipMixin to store XCom data.
 XCOM_SKIPMIXIN_KEY = "skipmixin_key"
@@ -64,7 +59,7 @@ class SkipMixin(LoggingMixin):
 
     @staticmethod
     def _set_state_to_skipped(
-        dag_run: DagRun | DagRunPydantic,
+        dag_run: DagRun,
         tasks: Sequence[str] | Sequence[tuple[str, int]],
         session: Session,
     ) -> None:
@@ -78,7 +73,7 @@ class SkipMixin(LoggingMixin):
                     .where(
                         TaskInstance.dag_id == dag_run.dag_id,
                         TaskInstance.run_id == dag_run.run_id,
-                        tuple_in_condition((TaskInstance.task_id, TaskInstance.map_index), tasks),
+                        tuple_(TaskInstance.task_id, TaskInstance.map_index).in_(tasks),
                     )
                     .values(state=TaskInstanceState.SKIPPED, start_date=now, end_date=now)
                     .execution_options(synchronize_session=False)
@@ -95,30 +90,13 @@ class SkipMixin(LoggingMixin):
                     .execution_options(synchronize_session=False)
                 )
 
+    @provide_session
     def skip(
         self,
-        dag_run: DagRun | DagRunPydantic,
-        execution_date: DateTime,
+        dag_run: DagRun,
         tasks: Iterable[DAGNode],
         map_index: int = -1,
-    ):
-        """Facade for compatibility for call to internal API."""
-        # SkipMixin may not necessarily have a task_id attribute. Only store to XCom if one is available.
-        task_id: str | None = getattr(self, "task_id", None)
-        SkipMixin._skip(
-            dag_run=dag_run, task_id=task_id, execution_date=execution_date, tasks=tasks, map_index=map_index
-        )
-
-    @staticmethod
-    @internal_api_call
-    @provide_session
-    def _skip(
-        dag_run: DagRun | DagRunPydantic,
-        task_id: str | None,
-        execution_date: DateTime,
-        tasks: Iterable[DAGNode],
         session: Session = NEW_SESSION,
-        map_index: int = -1,
     ):
         """
         Set tasks instances to skipped from the same dag run.
@@ -128,34 +106,15 @@ class SkipMixin(LoggingMixin):
         are cleared.
 
         :param dag_run: the DagRun for which to set the tasks to skipped
-        :param execution_date: execution_date
         :param tasks: tasks to skip (not task_ids)
         :param session: db session to use
         :param map_index: map_index of the current task instance
         """
+        # SkipMixin may not necessarily have a task_id attribute. Only store to XCom if one is available.
+        task_id: str | None = getattr(self, "task_id", None)
         task_list = _ensure_tasks(tasks)
         if not task_list:
             return
-
-        if execution_date and not dag_run:
-            from airflow.models.dagrun import DagRun
-
-            warnings.warn(
-                "Passing an execution_date to `skip()` is deprecated in favour of passing a dag_run",
-                RemovedInAirflow3Warning,
-                stacklevel=2,
-            )
-
-            dag_run = session.scalars(
-                select(DagRun).where(
-                    DagRun.dag_id == task_list[0].dag_id, DagRun.execution_date == execution_date
-                )
-            ).one()
-
-        elif execution_date and dag_run and execution_date != dag_run.execution_date:
-            raise ValueError(
-                "execution_date has a different value to  dag_run.execution_date -- please only pass dag_run"
-            )
 
         if dag_run is None:
             raise ValueError("dag_run is required")
@@ -177,23 +136,10 @@ class SkipMixin(LoggingMixin):
                 session=session,
             )
 
+    @provide_session
     def skip_all_except(
         self,
-        ti: TaskInstance | TaskInstancePydantic,
-        branch_task_ids: None | str | Iterable[str],
-    ):
-        """Facade for compatibility for call to internal API."""
-        # Ensure we don't serialize a generator object
-        if branch_task_ids and isinstance(branch_task_ids, GeneratorType):
-            branch_task_ids = list(branch_task_ids)
-        SkipMixin._skip_all_except(ti=ti, branch_task_ids=branch_task_ids)
-
-    @classmethod
-    @internal_api_call
-    @provide_session
-    def _skip_all_except(
-        cls,
-        ti: TaskInstance | TaskInstancePydantic,
+        ti: TaskInstance,
         branch_task_ids: None | str | Iterable[str],
         session: Session = NEW_SESSION,
     ):
@@ -206,7 +152,10 @@ class SkipMixin(LoggingMixin):
         branch_task_ids is stored to XCom so that NotPreviouslySkippedDep knows skipped tasks or
         newly added tasks should be skipped when they are cleared.
         """
-        log = cls().log  # Note: need to catch logger form instance, static logger breaks pytest
+        # Ensure we don't serialize a generator object
+        if branch_task_ids and isinstance(branch_task_ids, GeneratorType):
+            branch_task_ids = list(branch_task_ids)
+        log = self.log  # Note: need to catch logger form instance, static logger breaks pytest
         if isinstance(branch_task_ids, str):
             branch_task_id_set = {branch_task_ids}
         elif isinstance(branch_task_ids, Iterable):

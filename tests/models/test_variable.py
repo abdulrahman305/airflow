@@ -27,8 +27,9 @@ from cryptography.fernet import Fernet
 from airflow.models import Variable, crypto, variable
 from airflow.secrets.cache import SecretCache
 from airflow.secrets.metastore import MetastoreBackend
-from tests.test_utils import db
-from tests.test_utils.config import conf_vars
+
+from tests_common.test_utils import db
+from tests_common.test_utils.config import conf_vars
 
 pytestmark = pytest.mark.db_test
 
@@ -98,9 +99,8 @@ class TestVariable:
 
     def test_variable_set_get_round_trip(self):
         Variable.set("tested_var_set_id", "Monday morning breakfast")
-        assert "Monday morning breakfast" == Variable.get("tested_var_set_id")
+        assert Variable.get("tested_var_set_id") == "Monday morning breakfast"
 
-    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_variable_set_with_env_variable(self, caplog, session):
         caplog.set_level(logging.WARNING, logger=variable.log.name)
         Variable.set(key="key", value="db-value", session=session)
@@ -108,11 +108,11 @@ class TestVariable:
             # setting value while shadowed by an env variable will generate a warning
             Variable.set(key="key", value="new-db-value", session=session)
             # value set above is not returned because the env variable value takes priority
-            assert "env-value" == Variable.get("key")
+            assert Variable.get("key") == "env-value"
         # invalidate the cache to re-evaluate value
         SecretCache.invalidate_variable("key")
         # now that env var is not here anymore, we see the value we set before.
-        assert "new-db-value" == Variable.get("key")
+        assert Variable.get("key") == "new-db-value"
 
         assert caplog.messages[0] == (
             "The variable key is defined in the EnvironmentVariablesBackend secrets backend, "
@@ -121,7 +121,6 @@ class TestVariable:
             "EnvironmentVariablesBackend"
         )
 
-    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @mock.patch("airflow.models.variable.ensure_secrets_loaded")
     def test_variable_set_with_extra_secret_backend(self, mock_ensure_secrets, caplog, session):
         caplog.set_level(logging.WARNING, logger=variable.log.name)
@@ -148,9 +147,9 @@ class TestVariable:
 
     def test_variable_update(self, session):
         Variable.set(key="test_key", value="value1", session=session)
-        assert "value1" == Variable.get(key="test_key")
+        assert Variable.get(key="test_key") == "value1"
         Variable.update(key="test_key", value="value2", session=session)
-        assert "value2" == Variable.get("test_key")
+        assert Variable.get("test_key") == "value2"
 
     def test_variable_update_fails_on_non_metastore_variable(self, session):
         with mock.patch.dict("os.environ", AIRFLOW_VAR_KEY="env-value"):
@@ -176,7 +175,7 @@ class TestVariable:
         test_key = "test_key"
         Variable.set(key=test_key, value=test_value, session=session)
         Variable.set(key=test_key, value="", session=session)
-        assert "" == Variable.get("test_key")
+        assert Variable.get("test_key") == ""
 
     def test_get_non_existing_var_should_return_default(self):
         default_value = "some default val"
@@ -199,21 +198,18 @@ class TestVariable:
             "thisIdDoesNotExist", default_var=default_value, deserialize_json=True
         )
 
-    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_variable_setdefault_round_trip(self, session):
         key = "tested_var_setdefault_1_id"
         value = "Monday morning breakfast in Paris"
         Variable.setdefault(key=key, default=value)
         assert value == Variable.get(key)
 
-    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_variable_setdefault_round_trip_json(self, session):
         key = "tested_var_setdefault_2_id"
         value = {"city": "Paris", "Happiness": True}
         Variable.setdefault(key=key, default=value, deserialize_json=True)
         assert value == Variable.get(key, deserialize_json=True)
 
-    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_variable_setdefault_existing_json(self, session):
         key = "tested_var_setdefault_2_id"
         value = {"city": "Paris", "Happiness": True}
@@ -316,7 +312,7 @@ def test_masking_only_secret_values(variable_value, deserialize_json, expected_m
             val=variable_value,
         )
         session.add(var)
-        session.flush()
+        session.commit()
         # Make sure we re-load it, not just get the cached object back
         session.expunge(var)
         _secrets_masker().patterns = set()
@@ -326,5 +322,4 @@ def test_masking_only_secret_values(variable_value, deserialize_json, expected_m
         for expected_masked_value in expected_masked_values:
             assert expected_masked_value in _secrets_masker().patterns
     finally:
-        session.rollback()
         db.clear_db_variables()

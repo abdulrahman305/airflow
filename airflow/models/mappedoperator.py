@@ -21,12 +21,13 @@ import collections.abc
 import contextlib
 import copy
 import warnings
-from typing import TYPE_CHECKING, Any, ClassVar, Collection, Iterable, Iterator, Mapping, Sequence, Union
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Union
 
 import attr
 import methodtools
 
-from airflow.exceptions import AirflowException, UnmappableOperator
+from airflow.exceptions import UnmappableOperator
 from airflow.models.abstractoperator import (
     DEFAULT_EXECUTOR,
     DEFAULT_IGNORE_FIRST_DEPENDS_ON_PAST,
@@ -52,7 +53,6 @@ from airflow.serialization.enums import DagAttributeTypes
 from airflow.task.priority_strategy import PriorityWeightStrategy, validate_and_load_priority_weight_strategy
 from airflow.ti_deps.deps.mapped_task_expanded import MappedTaskIsExpanded
 from airflow.triggers.base import StartTriggerArgs
-from airflow.typing_compat import Literal
 from airflow.utils.context import context_update_for_unmapped
 from airflow.utils.helpers import is_container, prevent_duplicates
 from airflow.utils.task_instance_session import get_current_task_instance_session
@@ -61,7 +61,7 @@ from airflow.utils.xcom import XCOM_RETURN_KEY
 
 if TYPE_CHECKING:
     import datetime
-    from typing import List
+    from typing import Literal
 
     import jinja2  # Slow import.
     import pendulum
@@ -87,9 +87,9 @@ if TYPE_CHECKING:
     from airflow.utils.task_group import TaskGroup
     from airflow.utils.trigger_rule import TriggerRule
 
-    TaskStateChangeCallbackAttrType = Union[None, TaskStateChangeCallback, List[TaskStateChangeCallback]]
+    TaskStateChangeCallbackAttrType = Union[None, TaskStateChangeCallback, list[TaskStateChangeCallback]]
 
-ValidationSource = Union[Literal["expand"], Literal["partial"]]
+    ValidationSource = Literal["expand", "partial"]
 
 
 def validate_mapping_kwargs(op: type[BaseOperator], func: ValidationSource, value: dict[str, Any]) -> None:
@@ -157,10 +157,6 @@ class OperatorPartial:
     _expand_called: bool = False  # Set when expand() is called to ease user debugging.
 
     def __attrs_post_init__(self):
-        from airflow.operators.subdag import SubDagOperator
-
-        if issubclass(self.operator_class, SubDagOperator):
-            raise TypeError("Mapping over deprecated SubDagOperator is not supported")
         validate_mapping_kwargs(self.operator_class, "partial", self.kwargs)
 
     def __repr__(self) -> str:
@@ -205,8 +201,8 @@ class OperatorPartial:
         task_id = partial_kwargs.pop("task_id")
         dag = partial_kwargs.pop("dag")
         task_group = partial_kwargs.pop("task_group")
-        start_date = partial_kwargs.pop("start_date")
-        end_date = partial_kwargs.pop("end_date")
+        start_date = partial_kwargs.pop("start_date", None)
+        end_date = partial_kwargs.pop("end_date", None)
 
         try:
             operator_name = self.operator_class.custom_operator_name  # type: ignore
@@ -306,7 +302,6 @@ class MappedOperator(AbstractOperator):
     This should be a name to call ``getattr()`` on.
     """
 
-    subdag: None = None  # Since we don't support SubDagOperator, this is always None.
     supports_lineage: bool = False
 
     HIDE_ATTRS_FROM_UI: ClassVar[frozenset[str]] = AbstractOperator.HIDE_ATTRS_FROM_UI | frozenset(
@@ -333,21 +328,16 @@ class MappedOperator(AbstractOperator):
         for k, v in self.partial_kwargs.items():
             if k in self.template_fields:
                 XComArg.apply_upstream_relationship(self, v)
-        if self.partial_kwargs.get("sla") is not None:
-            raise AirflowException(
-                f"SLAs are unsupported with mapped tasks. Please set `sla=None` for task "
-                f"{self.task_id!r}."
-            )
 
     @methodtools.lru_cache(maxsize=None)
     @classmethod
     def get_serialized_fields(cls):
         # Not using 'cls' here since we only want to serialize base fields.
-        return frozenset(attr.fields_dict(MappedOperator)) - {
+        return (frozenset(attr.fields_dict(MappedOperator)) | {"task_type"}) - {
+            "_task_type",
             "dag",
             "deps",
             "expand_input",  # This is needed to be able to accept XComArg.
-            "subdag",
             "task_group",
             "upstream_task_ids",
             "supports_lineage",
@@ -554,14 +544,6 @@ class MappedOperator(AbstractOperator):
         self.partial_kwargs["weight_rule"] = validate_and_load_priority_weight_strategy(value)
 
     @property
-    def sla(self) -> datetime.timedelta | None:
-        return self.partial_kwargs.get("sla")
-
-    @sla.setter
-    def sla(self, value: datetime.timedelta | None) -> None:
-        self.partial_kwargs["sla"] = value
-
-    @property
     def max_active_tis_per_dag(self) -> int | None:
         return self.partial_kwargs.get("max_active_tis_per_dag")
 
@@ -689,7 +671,7 @@ class MappedOperator(AbstractOperator):
         return DagAttributeTypes.OP, self.task_id
 
     def _expand_mapped_kwargs(
-        self, context: Context, session: Session, *, include_xcom: bool
+        self, context: Mapping[str, Any], session: Session, *, include_xcom: bool
     ) -> tuple[Mapping[str, Any], set[int]]:
         """
         Get the kwargs to create the unmapped operator.
@@ -839,6 +821,8 @@ class MappedOperator(AbstractOperator):
         from airflow.serialization.serialized_objects import SerializedBaseOperator
 
         op = SerializedBaseOperator(task_id=self.task_id, params=self.params, _airflow_from_mapped=True)
+        for partial_attr, value in self.partial_kwargs.items():
+            setattr(op, partial_attr, value)
         SerializedBaseOperator.populate_operator(op, self.operator_class)
         if self.dag is not None:  # For Mypy; we only serialize tasks in a DAG so the check always satisfies.
             SerializedBaseOperator.set_task_dag_references(op, self.dag)
@@ -885,7 +869,7 @@ class MappedOperator(AbstractOperator):
 
     def render_template_fields(
         self,
-        context: Context,
+        context: Mapping[str, Any],
         jinja_env: jinja2.Environment | None = None,
     ) -> None:
         """

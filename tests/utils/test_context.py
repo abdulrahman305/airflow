@@ -20,56 +20,83 @@ from __future__ import annotations
 
 import pytest
 
-from airflow.datasets import Dataset, DatasetAlias, DatasetAliasEvent
-from airflow.models.dataset import DatasetAliasModel, DatasetModel
-from airflow.utils.context import OutletEventAccessor, OutletEventAccessors
+from airflow.models.asset import AssetActive, AssetAliasModel, AssetModel
+from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetAliasUniqueKey, AssetUniqueKey
+from airflow.utils.context import AssetAliasEvent, OutletEventAccessor, OutletEventAccessors
 
 
 class TestOutletEventAccessor:
     @pytest.mark.parametrize(
-        "raw_key, dataset_alias_event",
+        "key, asset_alias_events",
         (
+            (AssetUniqueKey.from_asset(Asset("test_uri")), []),
             (
-                DatasetAlias("test_alias"),
-                DatasetAliasEvent(source_alias_name="test_alias", dest_dataset_uri="test_uri"),
+                AssetAliasUniqueKey.from_asset_alias(AssetAlias("test_alias")),
+                [
+                    AssetAliasEvent(
+                        source_alias_name="test_alias",
+                        dest_asset_key=AssetUniqueKey(uri="test_uri", name="test_uri"),
+                        extra={},
+                    )
+                ],
             ),
-            (Dataset("test_uri"), None),
         ),
     )
-    def test_add(self, raw_key, dataset_alias_event):
-        outlet_event_accessor = OutletEventAccessor(raw_key=raw_key, extra={})
-        outlet_event_accessor.add(Dataset("test_uri"))
-        assert outlet_event_accessor.dataset_alias_event == dataset_alias_event
+    @pytest.mark.db_test
+    def test_add(self, key, asset_alias_events, session):
+        asset = Asset("test_uri")
+        session.add_all([AssetModel.from_public(asset), AssetActive.for_asset(asset)])
+        session.flush()
+
+        outlet_event_accessor = OutletEventAccessor(key=key, extra={})
+        outlet_event_accessor.add(asset)
+        assert outlet_event_accessor.asset_alias_events == asset_alias_events
 
     @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "raw_key, dataset_alias_event",
+        "key, asset_alias_events",
         (
+            (AssetUniqueKey.from_asset(Asset("test_uri")), []),
             (
-                DatasetAlias("test_alias"),
-                DatasetAliasEvent(source_alias_name="test_alias", dest_dataset_uri="test_uri"),
+                AssetAliasUniqueKey.from_asset_alias(AssetAlias("test_alias")),
+                [
+                    AssetAliasEvent(
+                        source_alias_name="test_alias",
+                        dest_asset_key=AssetUniqueKey(name="test-asset", uri="test://asset-uri/"),
+                        extra={},
+                    )
+                ],
             ),
-            ("test_alias", DatasetAliasEvent(source_alias_name="test_alias", dest_dataset_uri="test_uri")),
-            (Dataset("test_uri"), None),
         ),
     )
-    def test_add_with_db(self, raw_key, dataset_alias_event, session):
-        dsm = DatasetModel(uri="test_uri")
-        dsam = DatasetAliasModel(name="test_alias")
-        session.add_all([dsm, dsam])
+    def test_add_with_db(self, key, asset_alias_events, session):
+        asset = Asset(uri="test://asset-uri", name="test-asset")
+        asm = AssetModel.from_public(asset)
+        aam = AssetAliasModel(name="test_alias")
+        session.add_all([asm, aam, AssetActive.for_asset(asset)])
         session.flush()
 
-        outlet_event_accessor = OutletEventAccessor(raw_key=raw_key, extra={})
-        outlet_event_accessor.add("test_uri")
-        assert outlet_event_accessor.dataset_alias_event == dataset_alias_event
+        outlet_event_accessor = OutletEventAccessor(key=key, extra={"not": ""})
+        outlet_event_accessor.add(asset, extra={})
+        assert outlet_event_accessor.asset_alias_events == asset_alias_events
 
 
 class TestOutletEventAccessors:
-    @pytest.mark.parametrize("key", ("test", Dataset("test"), DatasetAlias("test_alias")))
-    def test____get_item___dict_key_not_exists(self, key):
+    @pytest.mark.parametrize(
+        "access_key, internal_key",
+        (
+            (Asset("test"), AssetUniqueKey.from_asset(Asset("test"))),
+            (
+                Asset(name="test", uri="test://asset"),
+                AssetUniqueKey.from_asset(Asset(name="test", uri="test://asset")),
+            ),
+            (AssetAlias("test_alias"), AssetAliasUniqueKey.from_asset_alias(AssetAlias("test_alias"))),
+        ),
+    )
+    def test___get_item__dict_key_not_exists(self, access_key, internal_key):
         outlet_event_accessors = OutletEventAccessors()
         assert len(outlet_event_accessors) == 0
-        outlet_event_accessor = outlet_event_accessors[key]
+        outlet_event_accessor = outlet_event_accessors[access_key]
         assert len(outlet_event_accessors) == 1
-        assert outlet_event_accessor.raw_key == key
+        assert outlet_event_accessor.key == internal_key
         assert outlet_event_accessor.extra == {}

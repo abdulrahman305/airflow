@@ -37,7 +37,7 @@ from airflow.jobs.base_job_runner import BaseJobRunner
 from airflow.jobs.job import perform_heartbeat
 from airflow.models.trigger import Trigger
 from airflow.stats import Stats
-from airflow.traces.tracer import Trace, span
+from airflow.traces.tracer import Trace, add_span
 from airflow.triggers.base import TriggerEvent
 from airflow.typing_compat import TypedDict
 from airflow.utils import timezone
@@ -392,14 +392,14 @@ class TriggererJobRunner(BaseJobRunner, LoggingMixin):
             # Idle sleep
             time.sleep(1)
 
-    @span
+    @add_span
     def load_triggers(self):
         """Query the database for the triggers we're supposed to be running and update the runner."""
         Trigger.assign_unassigned(self.job.id, self.capacity, self.health_check_threshold)
         ids = Trigger.ids_for_triggerer(self.job.id)
         self.trigger_runner.update_triggers(set(ids))
 
-    @span
+    @add_span
     def handle_events(self):
         """Dispatch outbound events to the Trigger model which pushes them to the relevant task instances."""
         while self.trigger_runner.events:
@@ -410,7 +410,7 @@ class TriggererJobRunner(BaseJobRunner, LoggingMixin):
             # Emit stat event
             Stats.incr("triggers.succeeded")
 
-    @span
+    @add_span
     def handle_failed_triggers(self):
         """
         Handle "failed" triggers. - ones that errored or exited before they sent an event.
@@ -424,15 +424,25 @@ class TriggererJobRunner(BaseJobRunner, LoggingMixin):
             # Emit stat event
             Stats.incr("triggers.failed")
 
-    @span
+    @add_span
     def emit_metrics(self):
         Stats.gauge(f"triggers.running.{self.job.hostname}", len(self.trigger_runner.triggers))
         Stats.gauge(
             "triggers.running", len(self.trigger_runner.triggers), tags={"hostname": self.job.hostname}
         )
+
+        capacity_left = self.capacity - len(self.trigger_runner.triggers)
+        Stats.gauge(f"triggerer.capacity_left.{self.job.hostname}", capacity_left)
+        Stats.gauge("triggerer.capacity_left", capacity_left, tags={"hostname": self.job.hostname})
+
         span = Trace.get_current_span()
-        span.set_attribute("trigger host", self.job.hostname)
-        span.set_attribute("triggers running", len(self.trigger_runner.triggers))
+        span.set_attributes(
+            {
+                "trigger host": self.job.hostname,
+                "triggers running": len(self.trigger_runner.triggers),
+                "capacity left": capacity_left,
+            }
+        )
 
 
 class TriggerDetails(TypedDict):
@@ -520,11 +530,15 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         while self.to_create:
             trigger_id, trigger_instance = self.to_create.popleft()
             if trigger_id not in self.triggers:
-                ti: TaskInstance = trigger_instance.task_instance
+                ti: TaskInstance | None = trigger_instance.task_instance
+                trigger_name = (
+                    f"{ti.dag_id}/{ti.run_id}/{ti.task_id}/{ti.map_index}/{ti.try_number} (ID {trigger_id})"
+                    if ti
+                    else f"ID {trigger_id}"
+                )
                 self.triggers[trigger_id] = {
                     "task": asyncio.create_task(self.run_trigger(trigger_id, trigger_instance)),
-                    "name": f"{ti.dag_id}/{ti.run_id}/{ti.task_id}/{ti.map_index}/{ti.try_number} "
-                    f"(ID {trigger_id})",
+                    "name": trigger_name,
                     "events": 0,
                 }
             else:
@@ -626,13 +640,14 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         name = self.triggers[trigger_id]["name"]
         self.log.info("trigger %s starting", name)
         try:
-            self.set_individual_trigger_logging(trigger)
+            if trigger.task_instance:
+                self.set_individual_trigger_logging(trigger)
             async for event in trigger.run():
                 self.log.info("Trigger %s fired: %s", self.triggers[trigger_id]["name"], event)
                 self.triggers[trigger_id]["events"] += 1
                 self.events.append((trigger_id, event))
         except asyncio.CancelledError:
-            if timeout := trigger.task_instance.trigger_timeout:
+            if timeout := trigger.task_instance and trigger.task_instance.trigger_timeout:
                 timeout = timeout.replace(tzinfo=timezone.utc) if not timeout.tzinfo else timeout
                 if timeout < timezone.utcnow():
                     self.log.error("Trigger cancelled due to timeout")
@@ -686,6 +701,7 @@ class TriggerRunner(threading.Thread, LoggingMixin):
         cancel_trigger_ids = running_trigger_ids - requested_trigger_ids
         # Bulk-fetch new trigger records
         new_triggers = Trigger.bulk_fetch(new_trigger_ids)
+        triggers_with_assets = Trigger.fetch_trigger_ids_with_asset()
         # Add in new triggers
         for new_id in new_trigger_ids:
             # Check it didn't vanish in the meantime
@@ -701,11 +717,11 @@ class TriggerRunner(threading.Thread, LoggingMixin):
                 self.failed_triggers.append((new_id, e))
                 continue
 
-            # If new_trigger_orm.task_instance is None, this means the TaskInstance
+            # If the trigger is not associated to a task or an asset, this means the TaskInstance
             # row was updated by either Trigger.submit_event or Trigger.submit_failure
             # and can happen when a single trigger Job is being run on multiple TriggerRunners
             # in a High-Availability setup.
-            if new_trigger_orm.task_instance is None:
+            if new_trigger_orm.task_instance is None and new_id not in triggers_with_assets:
                 self.log.info(
                     (
                         "TaskInstance for Trigger ID %s is None. It was likely updated by another trigger job. "

@@ -63,16 +63,13 @@ OpenLineage defines a few methods for implementation in Operators. Those are ref
 
 .. code-block:: python
 
-  def get_openlineage_facets_on_start() -> OperatorLineage:
-      ...
+  def get_openlineage_facets_on_start() -> OperatorLineage: ...
 
 
-  def get_openlineage_facets_on_complete(ti: TaskInstance) -> OperatorLineage:
-      ...
+  def get_openlineage_facets_on_complete(ti: TaskInstance) -> OperatorLineage: ...
 
 
-  def get_openlineage_facets_on_failure(ti: TaskInstance) -> OperatorLineage:
-      ...
+  def get_openlineage_facets_on_failure(ti: TaskInstance) -> OperatorLineage: ...
 
 OpenLineage methods get called respectively when task instance changes state to:
 
@@ -137,7 +134,7 @@ Authors of tests need to remember the condition of calling different OL methods 
 ``get_openlineage_facets_on_start`` is called before ``execute``, and as such, must not depend on values
 that are set there.
 
-See :ref:`local_troubleshooting:openlineage` for details on how to troubleshoot OpenLineage locally.
+See :ref:`troubleshooting:openlineage` for details on how to troubleshoot OpenLineage locally.
 
 There is no existing framework for system testing OpenLineage integration, but the easiest way it can be achieved is
 by comparing emitted events (f.e. with ``FileTransport``) against expected ones.
@@ -152,7 +149,7 @@ or just always the same in context of OpenLineage in Airflow, like ``producer``.
 Example
 ^^^^^^^
 
-Here's example of properly implemented ``get_openlineage_facets_on_complete`` method, for `GcsToGcsOperator <https://github.com/apache/airflow/blob/main/airflow/providers/google/cloud/transfers/gcs_to_gcs.py>`_.
+Here's example of properly implemented ``get_openlineage_facets_on_complete`` method, for `GcsToGcsOperator <https://github.com/apache/airflow/blob/main/providers/src/airflow/providers/google/cloud/transfers/gcs_to_gcs.py>`_.
 As there is some processing made in ``execute`` method, and there is no relevant failure data, implementing this single method is enough.
 
 .. code-block::  python
@@ -290,7 +287,7 @@ To learn more about how Operators and Extractors work together under the hood, c
 When testing an Extractor, we want to firstly verify if ``OperatorLineage`` object is being created,
 specifically verifying that the object is being built with the correct input and output datasets and relevant facets.
 This is done in OpenLineage via pytest, with appropriate mocking and patching for connections and objects.
-Check out `example tests <https://github.com/apache/airflow/blob/main/tests/providers/openlineage/extractors/test_base.py>`_.
+Check out `example tests <https://github.com/apache/airflow/blob/main/providers/tests/openlineage/extractors/test_base.py>`_.
 
 Testing each facet is also important, as data or graphs in the UI can render incorrectly if the facets are wrong.
 For example, if the facet name is created incorrectly in the Extractor, then the Operator's task will not show up in the lineage graph,
@@ -299,7 +296,7 @@ creating a gap in pipeline observability.
 Even with unit tests, an Extractor may still not be operating as expected.
 The easiest way to tell if data isn't coming through correctly is if the UI elements are not showing up correctly in the Lineage tab.
 
-See :ref:`local_troubleshooting:openlineage` for details on how to troubleshoot OpenLineage locally.
+See :ref:`troubleshooting:openlineage` for details on how to troubleshoot OpenLineage locally.
 
 Example
 ^^^^^^^
@@ -360,8 +357,8 @@ like extracting column level lineage and inputs/outputs from SQL query with SQL 
             return lineage_metadata
 
 For more examples of OpenLineage Extractors, check out the source code of
-`BashExtractor <https://github.com/apache/airflow/blob/main/airflow/providers/openlineage/extractors/bash.py>`_ or
-`PythonExtractor <https://github.com/apache/airflow/blob/main/airflow/providers/openlineage/extractors/python.py>`_.
+`BashExtractor <https://github.com/apache/airflow/blob/main/providers/src/airflow/providers/openlineage/extractors/bash.py>`_ or
+`PythonExtractor <https://github.com/apache/airflow/blob/main/providers/src/airflow/providers/openlineage/extractors/python.py>`_.
 
 .. _inlets_outlets:openlineage:
 
@@ -390,7 +387,7 @@ An Operator inside the Airflow DAG can be annotated with inlets and outlets like
     import pendulum
 
     from airflow import DAG
-    from airflow.operators.bash import BashOperator
+    from airflow.providers.standard.operators.bash import BashOperator
     from airflow.lineage.entities import Table, File, Column, User
 
 
@@ -430,7 +427,7 @@ An Operator inside the Airflow DAG can be annotated with inlets and outlets like
 
     with DAG(
         dag_id="example_operator",
-        schedule_interval="@once",
+        schedule="@once",
         start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     ) as dag:
         task1 = BashOperator(
@@ -573,9 +570,9 @@ OpenLineage reflects this structure in its Job Hierarchy model.
 
 TaskInstance events' ParentRunFacet references the originating DAG run.
 
-.. _local_troubleshooting:openlineage:
+.. _troubleshooting:openlineage:
 
-Local troubleshooting
+Troubleshooting
 =====================
 
 When testing code locally, `Marquez <https://marquezproject.ai/docs/quickstart>`_ can be used to inspect the data being emitted—or not being emitted.
@@ -584,6 +581,19 @@ If data is being emitted from the Extractor as expected but isn't making it to t
 then the Extractor is fine and an issue should be opened up in OpenLineage. However, if data is not being emitted properly,
 it is likely that more unit tests are needed to cover Extractor behavior.
 Marquez can help you pinpoint which facets are not being formed properly so you know where to add test coverage.
+
+Debug settings
+^^^^^^^^^^^^^^
+For debugging purposes, ensure that the `Airflow logging level <https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html#logging-level>`_
+is set to ``DEBUG`` and that the :ref:`debug_mode <options:debug_mode>` is enabled for OpenLineage integration.
+This will increase the detail in Airflow logs and include additional environmental information in OpenLineage events.
+
+When seeking help with debugging, always try to provide the following:
+
+-    Airflow scheduler logs with the logging level set to DEBUG
+-    Airflow worker logs (task logs) with the logging level set to DEBUG
+-    OpenLineage events with debug_mode enabled
+
 
 Where can I learn more?
 =======================
