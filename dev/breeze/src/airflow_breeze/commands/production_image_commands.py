@@ -42,6 +42,7 @@ from airflow_breeze.commands.common_image_options import (
     option_from_pr,
     option_from_run,
     option_github_token_for_images,
+    option_image_file_dir,
     option_install_mysql_client_type,
     option_platform_multiple,
     option_prepare_buildx_cache,
@@ -74,13 +75,17 @@ from airflow_breeze.commands.common_options import (
     option_use_uv_default_disabled,
     option_uv_http_timeout,
     option_verbose,
-    option_version_suffix_for_pypi,
+    option_version_suffix,
 )
 from airflow_breeze.commands.common_package_installation_options import (
     option_airflow_constraints_location,
     option_airflow_constraints_mode_prod,
 )
-from airflow_breeze.global_constants import ALLOWED_INSTALLATION_METHODS, DEFAULT_EXTRAS
+from airflow_breeze.global_constants import (
+    ALLOWED_INSTALLATION_METHODS,
+    CONSTRAINTS_SOURCE_PROVIDERS,
+    DEFAULT_EXTRAS,
+)
 from airflow_breeze.params.build_prod_params import BuildProdParams
 from airflow_breeze.utils.ci_group import ci_group
 from airflow_breeze.utils.click_utils import BreezeGroup
@@ -103,7 +108,7 @@ from airflow_breeze.utils.parallel import (
     check_async_run_results,
     run_with_pool,
 )
-from airflow_breeze.utils.path_utils import AIRFLOW_SOURCES_ROOT, DOCKER_CONTEXT_DIR
+from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH, DOCKER_CONTEXT_PATH
 from airflow_breeze.utils.python_versions import get_python_version_list
 from airflow_breeze.utils.run_tests import verify_an_image
 from airflow_breeze.utils.run_utils import fix_group_permissions, run_command
@@ -140,7 +145,7 @@ def run_build_in_parallel(
             ]
     check_async_run_results(
         results=results,
-        success="All images built correctly",
+        success_message="All images built correctly",
         outputs=outputs,
         include_success_outputs=include_success_outputs,
         skip_cleanup=skip_cleanup,
@@ -151,7 +156,7 @@ def prepare_for_building_prod_image(params: BuildProdParams):
     make_sure_builder_configured(params=params)
     if params.cleanup_context:
         clean_docker_context_files()
-    check_docker_context_files(params.install_packages_from_context)
+    check_docker_context_files(params.install_distributions_from_context)
 
 
 option_prod_image_file_to_save = click.option(
@@ -165,7 +170,7 @@ option_prod_image_file_to_save = click.option(
 option_prod_image_file_to_load = click.option(
     "--image-file",
     required=False,
-    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path, resolve_path=True),
+    type=click.Path(dir_okay=False, readable=True, path_type=Path, resolve_path=True),
     envvar="IMAGE_FILE",
     help="Optional file name to load the image from - name must follow the convention:"
     "`prod-image-save-{escaped_platform}-*-{python_version}.tar` where escaped_platform is one of "
@@ -189,21 +194,23 @@ def prod_image():
     show_default=True,
 )
 @click.option(
-    "--install-packages-from-context",
-    help="Install wheels from local docker-context-files when building image. "
-    "Implies --disable-airflow-repo-cache.",
+    "--install-distributions-from-context",
+    help="Install distributions from local docker-context-files when building image. "
+    "Implies --disable-airflow-repo-cache",
     is_flag=True,
+    envvar="INSTALL_DISTRIBUTIONS_FROM_CONTEXT",
 )
 @click.option(
-    "--use-constraints-for-context-packages",
-    help="Uses constraints for context packages installation - "
+    "--use-constraints-for-context-distributions",
+    help="Uses constraints for context distributions installation - "
     "either from constraints store in docker-context-files or from github.",
     is_flag=True,
+    envvar="USE_CONSTRAINTS_FOR_CONTEXT_DISTRIBUTIONS",
 )
 @click.option(
     "--cleanup-context",
     help="Clean up docker context files before running build (cannot be used together"
-    " with --install-packages-from-context).",
+    " with --install-distributions-from-context).",
     is_flag=True,
 )
 @click.option(
@@ -262,7 +269,7 @@ def prod_image():
 @option_use_uv_default_disabled
 @option_uv_http_timeout
 @option_verbose
-@option_version_suffix_for_pypi
+@option_version_suffix
 def build(
     additional_airflow_extras: str | None,
     additional_dev_apt_command: str | None,
@@ -297,7 +304,7 @@ def build(
     install_airflow_reference: str | None,
     install_airflow_version: str | None,
     install_mysql_client_type: str,
-    install_packages_from_context: bool,
+    install_distributions_from_context: bool,
     installation_method: str,
     parallelism: int,
     platform: str | None,
@@ -310,10 +317,10 @@ def build(
     runtime_apt_command: str | None,
     runtime_apt_deps: str | None,
     skip_cleanup: bool,
-    use_constraints_for_context_packages: bool,
+    use_constraints_for_context_distributions: bool,
     use_uv: bool,
     uv_http_timeout: int,
-    version_suffix_for_pypi: str,
+    version_suffix: str,
 ):
     """
     Build Production image. Include building multiple images for all or selected Python versions sequentially.
@@ -328,6 +335,10 @@ def build(
         if return_code != 0:
             get_console().print(f"[error]Error when building image! {info}")
             sys.exit(return_code)
+
+    if not install_airflow_version and not airflow_constraints_location:
+        get_console().print(f"[yellow]Using {CONSTRAINTS_SOURCE_PROVIDERS} constraints mode[/]")
+        airflow_constraints_mode = CONSTRAINTS_SOURCE_PROVIDERS
 
     perform_environment_checks()
     check_remote_ghcr_io_commands()
@@ -363,7 +374,7 @@ def build(
         install_airflow_reference=install_airflow_reference,
         install_airflow_version=install_airflow_version,
         install_mysql_client_type=install_mysql_client_type,
-        install_packages_from_context=install_packages_from_context,
+        install_distributions_from_context=install_distributions_from_context,
         installation_method=installation_method,
         prepare_buildx_cache=prepare_buildx_cache,
         push=push,
@@ -371,10 +382,10 @@ def build(
         python_image=python_image,
         runtime_apt_command=runtime_apt_command,
         runtime_apt_deps=runtime_apt_deps,
-        use_constraints_for_context_packages=use_constraints_for_context_packages,
+        use_constraints_for_context_distributions=use_constraints_for_context_distributions,
         use_uv=use_uv,
         uv_http_timeout=uv_http_timeout,
-        version_suffix_for_pypi=version_suffix_for_pypi,
+        version_suffix=version_suffix,
     )
     if platform:
         base_build_params.platform = platform
@@ -516,7 +527,7 @@ def run_verify_in_parallel(
             ]
     check_async_run_results(
         results=results,
-        success="All images verified",
+        success_message="All images verified",
         outputs=outputs,
         include_success_outputs=include_success_outputs,
         skip_cleanup=skip_cleanup,
@@ -534,6 +545,11 @@ def run_verify_in_parallel(
     "--slim-image",
     help="The image to verify is slim and non-slim tests should be skipped.",
     is_flag=True,
+)
+@click.option(
+    "--manifest-file",
+    type=click.Path(exists=True, dir_okay=False, file_okay=True, path_type=Path),
+    help="Read digest of the image from the manifest file instead of using name and pulling it.",
 )
 @click.argument("extra_pytest_args", nargs=-1, type=click.UNPROCESSED)
 @option_python
@@ -554,6 +570,7 @@ def verify(
     python_versions: str,
     github_repository: str,
     image_name: str,
+    manifest_file: Path | None,
     pull: bool,
     slim_image: bool,
     github_token: str,
@@ -567,9 +584,15 @@ def verify(
     """Verify Production image."""
     perform_environment_checks()
     check_remote_ghcr_io_commands()
-    if (pull or image_name) and run_in_parallel:
+    if image_name and manifest_file:
         get_console().print(
-            "[error]You cannot use --pull,--image-name and --run-in-parallel at the same time. Exiting[/]"
+            "[error]You cannot use --image-name and --manifest-file at the same time. Exiting[/"
+        )
+        sys.exit(1)
+    if (pull or image_name or manifest_file) and run_in_parallel:
+        get_console().print(
+            "[error]You cannot use --pull,--image-name,--manifest-file and "
+            "--run-in-parallel at the same time. Exiting[/]"
         )
         sys.exit(1)
     if run_in_parallel:
@@ -594,12 +617,20 @@ def verify(
         )
     else:
         if image_name is None:
-            build_params = BuildProdParams(
-                python=python,
-                github_repository=github_repository,
-                github_token=github_token,
-            )
-            image_name = build_params.airflow_image_name
+            if manifest_file:
+                import json
+
+                manifest_dict = json.loads(manifest_file.read_text())
+                name = manifest_dict["image.name"]
+                digest = manifest_dict["containerimage.descriptor"]["digest"]
+                image_name = f"{name}@{digest}"
+            else:
+                build_params = BuildProdParams(
+                    python=python,
+                    github_repository=github_repository,
+                    github_token=github_token,
+                )
+                image_name = build_params.airflow_image_name
         if pull:
             check_remote_ghcr_io_commands()
             command_to_run = ["docker", "pull", image_name]
@@ -616,17 +647,19 @@ def verify(
 
 
 @prod_image.command(name="save")
-@option_python
-@option_platform_single
 @option_github_repository
-@option_verbose
+@option_image_file_dir
+@option_platform_single
 @option_prod_image_file_to_save
+@option_python
+@option_verbose
 @option_dry_run
 def save(
     python: str,
     platform: str,
     github_repository: str,
     image_file: Path | None,
+    image_file_dir: Path,
 ):
     """Save PROD image to a file."""
     perform_environment_checks()
@@ -638,9 +671,15 @@ def save(
         run_command(["docker", "buildx", "du", "--verbose"], check=False)
     escaped_platform = platform.replace("/", "_")
     if not image_file:
-        image_file = Path(f"/tmp/prod-image-save-{escaped_platform}-{python}.tar")
-    get_console().print(f"[info]Saving Python PROD image {image_name} to {image_file}[/]")
-    result = run_command(["docker", "image", "save", "-o", image_file.as_posix(), image_name], check=False)
+        image_file_to_store = image_file_dir / f"prod-image-save-{escaped_platform}-{python}.tar"
+    elif image_file.is_absolute():
+        image_file_to_store = image_file
+    else:
+        image_file_to_store = image_file_dir / image_file
+    get_console().print(f"[info]Saving Python PROD image {image_name} to {image_file_to_store}[/]")
+    result = run_command(
+        ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name], check=False
+    )
     if result.returncode != 0:
         get_console().print(f"[error]Error when saving image: {result.stdout}[/]")
         sys.exit(result.returncode)
@@ -652,6 +691,7 @@ def save(
 @option_from_pr
 @option_github_repository
 @option_github_token_for_images
+@option_image_file_dir
 @option_platform_single
 @option_prod_image_file_to_save
 @option_python
@@ -661,8 +701,9 @@ def load(
     from_run: str | None,
     from_pr: str | None,
     github_repository: str,
-    github_token: str,
+    github_token: str | None,
     image_file: Path | None,
+    image_file_dir: Path,
     platform: str,
     python: str,
     skip_image_file_deletion: bool,
@@ -670,35 +711,47 @@ def load(
     """Load PROD image from a file."""
     perform_environment_checks()
     escaped_platform = platform.replace("/", "_")
-    path = f"/tmp/prod-image-save-{escaped_platform}-{python}.tar"
-    if from_run:
-        download_artifact_from_run_id(from_run, path, github_repository, github_token)
-    elif from_pr:
-        download_artifact_from_pr(from_pr, path, github_repository, github_token)
-    if not image_file:
-        image_file = Path(path)
-    if not image_file.exists():
-        get_console().print(f"[error]The image {image_file} does not exist.[/]")
-        sys.exit(1)
-    if not image_file.name.endswith(f"-{python}.tar"):
+
+    if from_run or from_pr and not github_token:
         get_console().print(
-            f"[error]The image file {image_file} does not end with '-{python}.tar'. Exiting.[/]"
+            "[error]The parameter `--github-token` must be provided if `--from-run` or `--from-pr` is "
+            "provided. Exiting.[/]"
         )
         sys.exit(1)
-    if not image_file.name.startswith(f"prod-image-save-{escaped_platform}"):
+
+    if not image_file:
+        image_file_to_load = image_file_dir / f"prod-image-save-{escaped_platform}-{python}.tar"
+    elif image_file.is_absolute() or image_file.exists():
+        image_file_to_load = image_file
+    else:
+        image_file_to_load = image_file_dir / image_file
+    if from_run:
+        download_artifact_from_run_id(from_run, image_file_to_load, github_repository, github_token)
+    elif from_pr:
+        download_artifact_from_pr(from_pr, image_file_to_load, github_repository, github_token)
+
+    if not image_file_to_load.exists():
+        get_console().print(f"[error]The image {image_file_to_load} does not exist.[/]")
+        sys.exit(1)
+    if not image_file_to_load.name.endswith(f"-{python}.tar"):
         get_console().print(
-            f"[error]The image file {image_file} does not start with 'prod-image-save-{escaped_platform}'"
+            f"[error]The image file {image_file_to_load} does not end with '-{python}.tar'. Exiting.[/]"
+        )
+        sys.exit(1)
+    if not image_file_to_load.name.startswith(f"prod-image-save-{escaped_platform}"):
+        get_console().print(
+            f"[error]The image file {image_file_to_load} does not start with 'prod-image-save-{escaped_platform}'"
             f". Exiting.[/]"
         )
         sys.exit(1)
-    get_console().print(f"[info]Loading Python PROD image from {image_file}[/]")
-    result = run_command(["docker", "image", "load", "-i", image_file.as_posix()], check=False)
+    get_console().print(f"[info]Loading Python PROD image from {image_file_to_load}[/]")
+    result = run_command(["docker", "image", "load", "-i", image_file_to_load.as_posix()], check=False)
     if result.returncode != 0:
         get_console().print(f"[error]Error when loading image: {result.stdout}[/]")
         sys.exit(result.returncode)
     if not skip_image_file_deletion:
-        get_console().print(f"[info]Deleting image file {image_file}[/]")
-        image_file.unlink()
+        get_console().print(f"[info]Deleting image file {image_file_to_load}[/]")
+        image_file_to_load.unlink()
     if get_verbose():
         run_command(["docker", "images", "-a"])
 
@@ -711,37 +764,37 @@ def clean_docker_context_files():
         get_console().print("[info]Cleaning docker-context-files[/]")
     if get_dry_run():
         return
-    context_files_to_delete = DOCKER_CONTEXT_DIR.rglob("*")
+    context_files_to_delete = DOCKER_CONTEXT_PATH.rglob("*")
     for file_to_delete in context_files_to_delete:
         if file_to_delete.name != ".README.md":
             file_to_delete.unlink(missing_ok=True)
 
 
-def check_docker_context_files(install_packages_from_context: bool):
+def check_docker_context_files(install_distributions_from_context: bool):
     """
     Quick check - if we want to install from docker-context-files we expect some packages there but if
     we don't - we don't expect them, and they might invalidate Docker cache.
 
     This method exits with an error if what we see is unexpected for given operation.
 
-    :param install_packages_from_context: whether we want to install from docker-context-files
+    :param install_distributions_from_context: whether we want to install from docker-context-files
     """
-    context_file = DOCKER_CONTEXT_DIR.rglob("*")
+    context_file = DOCKER_CONTEXT_PATH.rglob("*")
     any_context_files = any(
         context.is_file()
         and context.name not in (".README.md", ".DS_Store")
         and not context.parent.name.startswith("constraints")
         for context in context_file
     )
-    if not any_context_files and install_packages_from_context:
+    if not any_context_files and install_distributions_from_context:
         get_console().print("[warning]\nERROR! You want to install packages from docker-context-files")
         get_console().print("[warning]\n but there are no packages to install in this folder.")
         sys.exit(1)
-    elif any_context_files and not install_packages_from_context:
+    elif any_context_files and not install_distributions_from_context:
         get_console().print(
             "[warning]\n ERROR! There are some extra files in docker-context-files except README.md"
         )
-        get_console().print("[warning]\nAnd you did not choose --install-packages-from-context flag")
+        get_console().print("[warning]\nAnd you did not choose --install-distributions-from-context flag")
         get_console().print(
             "[warning]\nThis might result in unnecessary cache invalidation and long build times"
         )
@@ -792,7 +845,7 @@ def run_build_production_image(
             prepare_docker_build_command(
                 image_params=prod_image_params,
             ),
-            cwd=AIRFLOW_SOURCES_ROOT,
+            cwd=AIRFLOW_ROOT_PATH,
             check=False,
             env=env,
             text=True,
