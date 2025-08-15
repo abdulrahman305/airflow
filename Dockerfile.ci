@@ -16,6 +16,7 @@
 #
 # WARNING: THIS DOCKERFILE IS NOT INTENDED FOR PRODUCTION USE OR DEPLOYMENT.
 #
+ARG PYTHON_BASE_IMAGE=python:3.13.2-slim-bookworm
 ARG BASE_IMAGE="debian:bookworm-slim"
 
 ##############################################################################################
