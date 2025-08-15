@@ -36,7 +36,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
                 "--docker-host",
                 "--install-airflow-version",
                 "--python",
-                "--version-suffix-for-pypi",
+                "--version-suffix",
             ],
         },
         {
@@ -92,10 +92,10 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
             "options": [
                 "--installation-method",
                 "--install-airflow-reference",
-                "--install-packages-from-context",
+                "--install-distributions-from-context",
                 "--install-mysql-client-type",
                 "--cleanup-context",
-                "--use-constraints-for-context-packages",
+                "--use-constraints-for-context-distributions",
                 "--disable-airflow-repo-cache",
                 "--disable-mysql-client-installation",
                 "--disable-mssql-client-installation",
@@ -112,7 +112,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -140,7 +140,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -155,6 +155,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
                 "--python",
                 "--slim-image",
                 "--pull",
+                "--manifest-file",
             ],
         },
         {
@@ -169,7 +170,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -184,6 +185,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
                 "--platform",
                 "--github-repository",
                 "--image-file",
+                "--image-file-dir",
             ],
         },
     ],
@@ -194,6 +196,7 @@ PRODUCTION_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] =
                 "--python",
                 "--platform",
                 "--image-file",
+                "--image-file-dir",
                 "--github-repository",
                 "--github-token",
                 "--from-run",
